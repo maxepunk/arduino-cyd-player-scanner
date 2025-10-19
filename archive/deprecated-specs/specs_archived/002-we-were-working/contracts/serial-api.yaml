@@ -1,0 +1,193 @@
+# Serial Command API Contract
+# CYD Multi-Hardware Compatibility Testing
+# Version: 1.0.0
+
+openapi: 3.0.0
+info:
+  title: CYD Serial Command Interface
+  version: 1.0.0
+  description: Serial commands for diagnostic and control of CYD RFID Scanner
+
+paths:
+  /serial/commands:
+    description: Commands sent via Serial Monitor at 115200 baud
+    
+    /DIAG:
+      description: Run full system diagnostics
+      request:
+        format: "DIAG\n"
+      response:
+        format: JSON
+        schema:
+          type: object
+          properties:
+            hardware:
+              type: object
+              properties:
+                variant:
+                  type: string
+                  enum: [SINGLE_USB, DUAL_USB]
+                display:
+                  type: string
+                  enum: [ILI9341, ST7789]
+                backlight_pin:
+                  type: integer
+                  enum: [21, 27]
+            components:
+              type: object
+              properties:
+                display:
+                  $ref: '#/components/schemas/ComponentState'
+                touch:
+                  $ref: '#/components/schemas/ComponentState'
+                rfid:
+                  $ref: '#/components/schemas/ComponentState'
+                sd_card:
+                  $ref: '#/components/schemas/ComponentState'
+                audio:
+                  $ref: '#/components/schemas/ComponentState'
+            memory:
+              type: object
+              properties:
+                free_heap:
+                  type: integer
+                  minimum: 0
+                largest_block:
+                  type: integer
+                  minimum: 0
+            uptime_seconds:
+              type: integer
+              minimum: 0
+              
+    /TEST_{COMPONENT}:
+      description: Test specific component
+      parameters:
+        - name: COMPONENT
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [DISPLAY, TOUCH, RFID, SD, AUDIO]
+      request:
+        format: "TEST_{COMPONENT}\n"
+        example: "TEST_RFID\n"
+      response:
+        format: "Plain text with result"
+        examples:
+          RFID: |
+            Testing RFID...
+            Initializing MFRC522 on pins SCK=22, MOSI=27, MISO=35, SS=3
+            RFID Version: 0x92 (v2.0)
+            Self test: PASSED
+            Ready for card scan
+          TOUCH: |
+            Testing Touch IRQ...
+            IRQ Pin: GPIO36
+            Current state: HIGH (not pressed)
+            Debounce: 200ms (filters double interrupts)
+            Tap the screen to test...
+            Tap detected!
+            Double-tap detected!
+            Test complete
+          
+    /CALIBRATE:
+      description: Reserved for future use (touch uses IRQ-only, no calibration needed)
+      request:
+        format: "CALIBRATE\n"
+      response:
+        format: "Not implemented"
+        example: |
+          Touch calibration not supported.
+          Touch uses IRQ-only detection (tap/double-tap).
+          No coordinate reading available.
+          
+    /WIRING:
+      description: Display wiring diagram for current hardware
+      request:
+        format: "WIRING\n"
+      response:
+        format: "ASCII art wiring diagram"
+        example: |
+          CYD DUAL_USB Wiring Diagram:
+          ============================
+          
+          RFID RC522 → CYD Connector P3:
+          ┌─────────┐     ┌─────────┐
+          │ RC522   │     │ CYD P3  │
+          ├─────────┤     ├─────────┤
+          │ SDA  →──┼─────┼→ IO3    │
+          │ SCK  →──┼─────┼→ IO22   │
+          │ MOSI →──┼─────┼→ IO27*  │
+          │ MISO →──┼─────┼→ IO35   │
+          │ IRQ  →──┼─ NC │         │
+          │ GND  →──┼─────┼→ GND    │
+          │ RST  →──┼─────┼→ EN     │
+          │ VCC  →──┼─────┼→ 3.3V   │
+          └─────────┘     └─────────┘
+          
+          * GPIO27 is multiplexed with backlight
+          
+    /SCAN:
+      description: Force RFID scan attempt
+      request:
+        format: "SCAN\n"
+      response:
+        success:
+          format: "Card detected: UID=XX:XX:XX:XX"
+        failure:
+          format: "No card detected"
+          
+    /RESET:
+      description: Software reset ESP32
+      request:
+        format: "RESET\n"
+      response:
+        format: "Resetting in 3...2...1..."
+        
+    /VERSION:
+      description: Get firmware version
+      request:
+        format: "VERSION\n"
+      response:
+        format: "CYD Scanner v1.0.0 (Multi-Hardware)"
+
+components:
+  schemas:
+    ComponentState:
+      type: object
+      required:
+        - status
+        - message
+      properties:
+        status:
+          type: string
+          enum: [OK, FAILED, DEGRADED, NOT_TESTED]
+        message:
+          type: string
+          maxLength: 64
+        error_code:
+          type: integer
+          minimum: 0
+          maximum: 65535
+          
+    DiagnosticMode:
+      type: string
+      enum: [QUICK, FULL, CONTINUOUS]
+      description: |
+        QUICK: Basic component check
+        FULL: Comprehensive testing  
+        CONTINUOUS: Loop testing
+
+# Serial Configuration
+serial:
+  baudRate: 115200
+  dataBits: 8
+  stopBits: 1
+  parity: none
+  lineEnding: "\n"
+  
+# Response Timing
+timing:
+  commandTimeout: 5000  # ms
+  diagnosticTimeout: 10000  # ms
+  calibrationTimeout: 30000  # ms

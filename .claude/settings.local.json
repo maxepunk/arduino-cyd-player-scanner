@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "Bash(.specify/scripts/bash/create-new-feature.sh:*)",
+      "Bash(.specify/scripts/bash/setup-plan.sh:*)",
+      "Bash(.specify/scripts/bash/check-task-prerequisites.sh:*)",
+      "WebSearch",
+      "Bash(arduino-cli compile:*)",
+      "Bash(.specify/scripts/bash/check-implementation-prerequisites.sh:*)",
+      "Bash(arduino-cli:*)",
+      "Read(//dev/**)"
+    ],
+    "deny": [],
+    "ask": [],
+    "additionalDirectories": [
+      "/home/maxepunk/projects/AboutLastNight/ALN-Ecosystem/"
+    ]
+  }
+}

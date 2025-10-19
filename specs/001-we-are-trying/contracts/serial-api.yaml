@@ -1,0 +1,177 @@
+openapi: 3.0.0
+info:
+  title: CYD Display Configuration Serial API
+  version: 1.0.0
+  description: Serial command interface for CYD display testing and diagnostics
+
+paths:
+  /serial/DIAG:
+    post:
+      summary: Run full system diagnostics
+      operationId: runDiagnostics
+      responses:
+        '200':
+          description: Diagnostic results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiagnosticResponse'
+
+  /serial/TEST_DISPLAY:
+    post:
+      summary: Test display with color bars
+      operationId: testDisplay
+      responses:
+        '200':
+          description: Display test result
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "Display test complete. Driver: ST7789, Resolution: 240x320"
+
+  /serial/TEST_TOUCH:
+    post:
+      summary: Test touch interrupt detection
+      operationId: testTouch
+      responses:
+        '200':
+          description: Touch test initiated
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "Touch test started. Tap screen to test IRQ on GPIO36..."
+
+  /serial/TEST_RFID:
+    post:
+      summary: Test RFID module communication
+      operationId: testRFID
+      responses:
+        '200':
+          description: RFID test result
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "RFID module detected. Version: 0x92 (MFRC522 v2.0)"
+
+  /serial/TEST_SD:
+    post:
+      summary: Test SD card access
+      operationId: testSD
+      responses:
+        '200':
+          description: SD card test result
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "SD card mounted. Size: 8GB, Free: 7.5GB"
+
+  /serial/TEST_AUDIO:
+    post:
+      summary: Test audio output
+      operationId: testAudio
+      responses:
+        '200':
+          description: Audio test initiated
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "Playing test tone at 440Hz for 1 second..."
+
+  /serial/WIRING:
+    post:
+      summary: Show wiring diagram for detected variant
+      operationId: showWiring
+      responses:
+        '200':
+          description: Wiring diagram
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: |
+                  === CYD Wiring (ST7789 Variant) ===
+                  Display: CS=15, DC=2, RST=EN, BL=21
+                  Touch: CS=33, IRQ=36
+                  RFID: CS=3, SCK=22, MOSI=27, MISO=35
+                  SD: CS=5, SCK=18, MOSI=23, MISO=19
+
+  /serial/VERSION:
+    post:
+      summary: Get firmware version
+      operationId: getVersion
+      responses:
+        '200':
+          description: Version information
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "CYD Scanner v1.0.0 (001-we-are-trying)"
+
+  /serial/SCAN:
+    post:
+      summary: Force RFID scan attempt
+      operationId: forceScan
+      responses:
+        '200':
+          description: Scan result
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "Scanning... Card detected: UID=04:5A:3B:2C"
+
+components:
+  schemas:
+    DiagnosticResponse:
+      type: object
+      required:
+        - timestamp
+        - variant
+        - components
+      properties:
+        timestamp:
+          type: integer
+          description: System uptime in milliseconds
+        variant:
+          type: object
+          properties:
+            display:
+              type: string
+              enum: [ILI9341, ST7789, UNKNOWN]
+            usb:
+              type: string
+              enum: [SINGLE, DUAL, UNKNOWN]
+        components:
+          type: object
+          properties:
+            display:
+              $ref: '#/components/schemas/ComponentStatus'
+            touch:
+              $ref: '#/components/schemas/ComponentStatus'
+            rfid:
+              $ref: '#/components/schemas/ComponentStatus'
+            sd:
+              $ref: '#/components/schemas/ComponentStatus'
+            audio:
+              $ref: '#/components/schemas/ComponentStatus'
+
+    ComponentStatus:
+      type: object
+      required:
+        - status
+        - message
+      properties:
+        status:
+          type: string
+          enum: [OK, FAILED, NOT_FOUND]
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
