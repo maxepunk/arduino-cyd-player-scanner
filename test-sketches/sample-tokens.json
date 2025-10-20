@@ -1,0 +1,62 @@
+{
+  "534e2b02": {
+    "image": "/images/534e2b02.bmp",
+    "audio": "/audio/534E2B02.wav",
+    "video": null,
+    "processingImage": null,
+    "SF_RFID": "534e2b02",
+    "SF_ValueRating": 3,
+    "SF_MemoryType": "Technical",
+    "SF_Group": ""
+  },
+  "534e2b03": {
+    "image": null,
+    "audio": null,
+    "video": "test_30sec.mp4",
+    "processingImage": "/images/placeholder.bmp",
+    "SF_RFID": "534e2b03",
+    "SF_ValueRating": 3,
+    "SF_MemoryType": "Technical",
+    "SF_Group": ""
+  },
+  "tac001": {
+    "image": "/images/tac001.bmp",
+    "audio": "/audio/tac001.wav",
+    "video": null,
+    "processingImage": null,
+    "SF_RFID": "tac001",
+    "SF_ValueRating": 1,
+    "SF_MemoryType": "Personal",
+    "SF_Group": ""
+  },
+  "kaa001": {
+    "image": "/images/kaa001.bmp",
+    "audio": "/audio/kaa001.wav",
+    "video": null,
+    "processingImage": null,
+    "SF_RFID": "kaa001",
+    "SF_ValueRating": 1,
+    "SF_MemoryType": "Personal",
+    "SF_Group": ""
+  },
+  "asm001": {
+    "image": "/images/placeholder.bmp",
+    "audio": "/audio/asm001.wav",
+    "video": null,
+    "processingImage": null,
+    "SF_RFID": "asm001",
+    "SF_ValueRating": 3,
+    "SF_MemoryType": "Personal",
+    "SF_Group": "Marcus Sucks (x2)"
+  },
+  "rat001": {
+    "image": "/images/placeholder.bmp",
+    "audio": "/audio/rat001.wav",
+    "video": null,
+    "processingImage": null,
+    "SF_RFID": "rat001",
+    "SF_ValueRating": 4,
+    "SF_MemoryType": "Business",
+    "SF_Group": "Marcus Sucks(x2)"
+  }
+}

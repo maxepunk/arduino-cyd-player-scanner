@@ -9,7 +9,16 @@
       "Bash(arduino-cli compile:*)",
       "Bash(.specify/scripts/bash/check-implementation-prerequisites.sh:*)",
       "Bash(arduino-cli:*)",
-      "Read(//dev/**)"
+      "Read(//dev/**)",
+      "Read(//home/maxepunk/projects/AboutLastNight/aln-memory-scanner/js/**)",
+      "Read(//home/maxepunk/projects/AboutLastNight/aln-memory-scanner/**)",
+      "Bash(if [ -f data/tokens.json ])",
+      "Bash(then cat data/tokens.json)",
+      "Bash(else cat tokens.json)",
+      "Bash(fi)",
+      "Read(//home/maxepunk/projects/AboutLastNight/**)",
+      "Bash(.specify/scripts/bash/check-prerequisites.sh --json --require-tasks --include-tasks)",
+      "Skill(esp32-arduino)"
     ],
     "deny": [],
     "ask": [],

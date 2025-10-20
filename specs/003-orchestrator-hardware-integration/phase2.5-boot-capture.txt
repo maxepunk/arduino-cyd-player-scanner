@@ -1,0 +1,53 @@
+ets Jul 29 2019 12:21:46
+
+rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+configsip: 0, SPIWP:0xee
+clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+mode:DIO, clock div:1
+load:0x3fff0030,len:4980
+load:0x40078000,len:16612
+load:0x40080400,len:3480
+entry 0x400805b4
+
+━━━ CYD RFID Scanner v4.0 (Orchestrator Integration) ━━━
+Based on v3.4 - Fixed NDEF Parsing + CollReg Handling
+[BOOT] Reset reason: ESP_RST_POWERON (normal power-on)
+[BOOT] Free heap at start: 275552 bytes
+[BOOT] Chip model: ESP32, 2 cores, 240 MHz
+[AUDIO-FIX] DAC pins 25/26 set LOW to prevent electrical noise
+Initializing SD card...
+[ORCH] SD mutex created
+[ORCH] Reading config.txt...
+[CONFIG] Loaded:
+  WiFi SSID: Sidewinder
+  Orchestrator: http://10.0.0.177:3000
+  Team ID: 001
+  Device ID: (auto-generate)
+[ORCH] Loading token database...
+[TOKEN-DB] Loaded 0 tokens
+[ORCH] Queue size at boot: 0
+[ORCH] Using temporary device ID: SCANNER_TEMP001
+[WIFI] Connecting to Sidewinder...
+[4874] [WIFI] Connected to AP
+        SSID: Sidewinder, Channel: 1
+[5943] [WIFI] Got IP address: 10.0.0.137
+        Gateway: 10.0.0.1, Signal: -70 dBm
+[WIFI] Connected: 10.0.0.137
+[ORCH] Orchestrator reachable
+[ORCH] Background task created on Core 0[BG-TASK] Background task started on Core 0
+
+Touch interrupt configured
+Initializing RFID...
+[TIMER-FIX] MFRC522 timer disabled by default to prevent beeping
+[RF-FIELD] Antenna NOT enabled at startup (deferred for beeping fix)
+MFRC522 Version: 0x92 (v2.0)
+Verifying MFRC522 configuration:
+  CollReg: 0xA0 (bit 7 should be 1: OK)
+  RFCfgReg: 0x70 (should be 0x70 for max gain)
+Initializing Audio...
+[AUDIO-DEBUG] Timestamp: 6208 ms - Audio init in setup() SKIPPED (deferred)
+[AUDIO-FIX] Audio initialization deferred until first use
+━━━ Setup Complete ━━━
+Free heap: 173664 bytes
+[VALIDATION] Audio initialized: NO - Fix working (should be NO for fix to work)
+[SUCCESS] Audio deferred successfully - beeping should be eliminated

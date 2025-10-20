@@ -16,3 +16,15 @@
 # OS files
 .DS_Store
 Thumbs.db
+
+# C/C++ artifacts
+*.o
+*.a
+*.so
+*.log
+
+# Environment files
+.env*
+
+# Temporary files
+*.tmp

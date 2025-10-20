@@ -15,6 +15,13 @@
 #include "AudioFileSourceSD.h"
 #include "AudioGeneratorWAV.h"
 #include "AudioOutputI2S.h"
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <esp_wifi.h>
+#include <esp_system.h>
+#include <esp_mac.h>
+#include <vector>  // Phase 6: std::vector for batch queue operations
 
 // ─── Configuration Constants ─────────────────────────────────────
 #define RFID_MAX_RETRIES 3
@@ -22,6 +29,10 @@
 #define RFID_OPERATION_DELAY_US 10
 #define RFID_TIMEOUT_MS 100
 #define RFID_CLOCK_DELAY_US 2
+
+// Touch IRQ pulse width filter (validated Oct 19, 2025 - test-45v3)
+// Threshold: 10ms separates WiFi EMI (<0.01ms) from real touches (>70ms)
+#define TOUCH_PULSE_WIDTH_THRESHOLD_US 10000  // 10 milliseconds
 
 // ─── Pin Definitions ─────────────────────────────────────────────
 // SD Card (VSPI - Hardware SPI Bus 2)
@@ -81,7 +92,9 @@ AudioGeneratorWAV *wav = nullptr;
 AudioFileSourceSD *file = nullptr;
 AudioOutputI2S *out = nullptr;
 
+// Touch IRQ tracking with pulse width filtering
 volatile bool touchInterruptOccurred = false;
+volatile uint32_t touchInterruptTime = 0;
 uint32_t lastTouchTime = 0;
 bool lastTouchWasValid = false;
 const uint32_t DOUBLE_TAP_TIMEOUT = 500;
@@ -99,6 +112,107 @@ struct RFIDStats {
     uint32_t timeoutErrors = 0;
     uint32_t crcErrors = 0;
 } rfidStats;
+
+// ══════════════════════════════════════════════════════════════════
+// ═══ ORCHESTRATOR INTEGRATION (v4.0) ══════════════════════════════
+// ══════════════════════════════════════════════════════════════════
+
+// ─── Configuration (from SD:/config.txt) ─────────────────────────
+String wifiSSID = "";
+String wifiPassword = "";
+String orchestratorURL = "";
+String teamID = "";
+String deviceID = "";
+
+// ─── Connection State ─────────────────────────────────────────────
+enum ConnectionState {
+  ORCH_DISCONNECTED,      // WiFi not connected
+  ORCH_WIFI_CONNECTED,    // WiFi connected, orchestrator status unknown
+  ORCH_CONNECTED          // WiFi + orchestrator both reachable
+};
+
+volatile ConnectionState connState = ORCH_DISCONNECTED;
+
+// ─── FreeRTOS Synchronization for Orchestrator ───────────────────
+SemaphoreHandle_t sdMutex = NULL;
+portMUX_TYPE connStateMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE queueSizeMux = portMUX_INITIALIZER_UNLOCKED;
+
+volatile int queueSizeCached = 0;
+
+// ─── Queue Configuration ──────────────────────────────────────────
+#define MAX_QUEUE_SIZE 100
+#define QUEUE_FILE "/queue.jsonl"
+#define CONFIG_FILE "/config.txt"
+#define TOKEN_DB_FILE "/tokens.json"
+#define DEVICE_ID_FILE "/device_id.txt"
+
+// ─── Scan Request (for orchestrator communication) ───────────────
+struct ScanRequest {
+  String tokenId;
+  String teamId;
+  String deviceId;
+  String timestamp;
+};
+
+// ─── Queue Entry (for batch upload) ───────────────────────────────
+struct QueueEntry {
+  String tokenId;
+  String teamId;
+  String deviceId;
+  String timestamp;
+};
+
+// ─── Token Metadata (loaded from tokens.json) ────────────────────
+struct TokenMetadata {
+  String tokenId;
+  String video;          // null if not video token
+  String image;          // path to image file
+  String audio;          // path to audio file
+  String processingImage; // shown during "Sending..." modal for video tokens
+};
+
+// Simple array for token metadata (max 50 tokens)
+#define MAX_TOKENS 50
+TokenMetadata tokenDatabase[MAX_TOKENS];
+int tokenDatabaseSize = 0;
+
+// ─── Forward Declarations for Orchestrator Functions ─────────────
+void parseConfigFile();
+bool validateConfig();
+String generateDeviceId();
+void saveDeviceId(String devId);
+bool syncTokenDatabase();
+void initWiFiConnection();
+void WiFiEventHandler(WiFiEvent_t event);
+void backgroundTask(void* parameter);
+bool checkOrchestratorHealth();
+bool sendScan(String tokenId, String teamId, String deviceId, String timestamp);
+void queueScan(String tokenId, String teamId, String deviceId, String timestamp);
+int countQueueEntries();
+void readQueue(std::vector<QueueEntry>& entries, int maxEntries);
+void removeUploadedEntries(int numEntries);
+bool uploadQueueBatch();
+void loadTokenDatabase();
+TokenMetadata* getTokenMetadata(String tokenId);
+String generateTimestamp();
+
+// Phase 5 video token helpers
+bool hasVideoField(TokenMetadata* metadata);
+String getProcessingImagePath(TokenMetadata* metadata, String tokenId);
+void displayProcessingImage(String imagePath);
+
+// Connection state helpers
+void setConnectionState(ConnectionState newState);
+ConnectionState getConnectionState();
+void updateQueueSize(int delta);
+int getQueueSize();
+
+// SD mutex helpers
+bool sdTakeMutex(const char* caller, unsigned long timeoutMs = 500);
+void sdGiveMutex(const char* caller);
+
+// ══════════════════════════════════════════════════════════════════
 
 // ─── Software SPI Functions with Better Timing ───────────────────
 inline void SPI_ClockDelay() {
@@ -736,7 +850,7 @@ String extractNDEFText() {
 
 // ─── Helper Functions ─────────────────────────────────────────────
 String uidToFilename(const MFRC522::Uid &cardUid) {
-    String s = "/IMG/";
+    String s = "/images/";
     for (byte i = 0; i < cardUid.size; i++) {
         if (cardUid.uidByte[i] < 0x10) s += '0';
         s += String(cardUid.uidByte[i], HEX);
@@ -753,7 +867,7 @@ String ndefToFilename(const String &ndefText) {
         cleanText.replace(" ", "");  // Remove spaces
         cleanText.trim();
         cleanText.toUpperCase();
-        return "/IMG/" + cleanText + ".bmp";
+        return "/images/" + cleanText + ".bmp";
     }
     return "";
 }
@@ -1047,7 +1161,1055 @@ void dumpRegisters() {
 // ─── Touch Interrupt Service Routine ─────────────────────────────
 void IRAM_ATTR touchISR() {
     touchInterruptOccurred = true;
+    touchInterruptTime = micros();  // Record timestamp for pulse width measurement
 }
+
+// ─── Touch Pulse Width Measurement (WiFi EMI Filter) ─────────────
+// Measures how long GPIO36 stays LOW to distinguish WiFi EMI from real touches
+// Validated Oct 19, 2025: WiFi EMI <0.01ms, Real touches >70ms
+uint32_t measureTouchPulseWidth() {
+    uint32_t startUs = micros();
+    const uint32_t TIMEOUT_US = 500000;  // 500ms max
+
+    // Poll GPIO36 until it goes HIGH or timeout
+    while (digitalRead(TOUCH_IRQ) == LOW) {
+        if (micros() - startUs > TIMEOUT_US) {
+            return TIMEOUT_US;  // Still LOW after timeout
+        }
+    }
+
+    return micros() - startUs;
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ═══ ORCHESTRATOR HELPER FUNCTIONS (v4.0) ════════════════════════
+// ══════════════════════════════════════════════════════════════════
+
+// ─── Connection State Helpers ────────────────────────────────────
+void setConnectionState(ConnectionState newState) {
+  portENTER_CRITICAL(&connStateMux);
+  connState = newState;
+  portEXIT_CRITICAL(&connStateMux);
+}
+
+ConnectionState getConnectionState() {
+  portENTER_CRITICAL(&connStateMux);
+  ConnectionState state = connState;
+  portEXIT_CRITICAL(&connStateMux);
+  return state;
+}
+
+void updateQueueSize(int delta) {
+  portENTER_CRITICAL(&queueSizeMux);
+  queueSizeCached += delta;
+  portEXIT_CRITICAL(&queueSizeMux);
+}
+
+int getQueueSize() {
+  portENTER_CRITICAL(&queueSizeMux);
+  int size = queueSizeCached;
+  portEXIT_CRITICAL(&queueSizeMux);
+  return size;
+}
+
+// ─── SD Mutex Helpers ─────────────────────────────────────────────
+bool sdTakeMutex(const char* caller, unsigned long timeoutMs) {
+  if (!sdMutex) return true; // Mutex not initialized yet (boot phase)
+
+  bool gotLock = xSemaphoreTake(sdMutex, timeoutMs / portTICK_PERIOD_MS) == pdTRUE;
+
+  if (!gotLock) {
+    Serial.printf("[MUTEX] %s timed out waiting for SD lock\n", caller);
+  }
+
+  return gotLock;
+}
+
+void sdGiveMutex(const char* caller) {
+  if (sdMutex) {
+    xSemaphoreGive(sdMutex);
+  }
+}
+
+// ─── Utility Functions ────────────────────────────────────────────
+String generateTimestamp() {
+  unsigned long ms = millis();
+  unsigned long seconds = ms / 1000;
+  unsigned long minutes = seconds / 60;
+  unsigned long hours = minutes / 60;
+
+  char timestamp[30];
+  snprintf(timestamp, sizeof(timestamp),
+    "1970-01-01T%02lu:%02lu:%02lu.%03luZ",
+    hours % 24, minutes % 60, seconds % 60, ms % 1000);
+
+  return String(timestamp);
+}
+
+// ─── Reset Reason Diagnostics ─────────────────────────────────────
+void printResetReason() {
+  esp_reset_reason_t reason = esp_reset_reason();
+  Serial.print("[BOOT] Reset reason: ");
+
+  switch (reason) {
+    case ESP_RST_UNKNOWN:    Serial.println("ESP_RST_UNKNOWN (indeterminate)"); break;
+    case ESP_RST_POWERON:    Serial.println("ESP_RST_POWERON (normal power-on)"); break;
+    case ESP_RST_EXT:        Serial.println("ESP_RST_EXT (external pin reset)"); break;
+    case ESP_RST_SW:         Serial.println("ESP_RST_SW (software reset via esp_restart)"); break;
+    case ESP_RST_PANIC:      Serial.println("ESP_RST_PANIC (exception/panic - CRASH!)"); break;
+    case ESP_RST_INT_WDT:    Serial.println("ESP_RST_INT_WDT (interrupt watchdog - CODE HUNG!)"); break;
+    case ESP_RST_TASK_WDT:   Serial.println("ESP_RST_TASK_WDT (task watchdog - TASK HUNG!)"); break;
+    case ESP_RST_WDT:        Serial.println("ESP_RST_WDT (other watchdog - CODE HUNG!)"); break;
+    case ESP_RST_DEEPSLEEP:  Serial.println("ESP_RST_DEEPSLEEP (wake from deep sleep)"); break;
+    case ESP_RST_BROWNOUT:   Serial.println("ESP_RST_BROWNOUT (brownout reset - POWER ISSUE!)"); break;
+    case ESP_RST_SDIO:       Serial.println("ESP_RST_SDIO (SDIO reset)"); break;
+    default:                 Serial.printf("UNKNOWN (%d)\n", reason); break;
+  }
+}
+
+String generateDeviceId() {
+  // FIXED: Use esp_read_mac() per data-model.md specification
+  // This works before WiFi initialization (reads from eFuse)
+  Serial.printf("[DEVID] Free heap before generation: %d bytes\n", ESP.getFreeHeap());
+
+  uint8_t mac[6];
+  esp_err_t err = esp_read_mac(mac, ESP_MAC_WIFI_STA);
+
+  if (err != ESP_OK) {
+    Serial.printf("[DEVID] ✗✗✗ FAILURE ✗✗✗ esp_read_mac() returned error: %d\n", err);
+    return "SCANNER_ERROR";
+  }
+
+  Serial.printf("[DEVID] MAC bytes read: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+  // FIXED: Buffer was 20 bytes, but "SCANNER_" (8) + 12 hex digits + NULL = 21 bytes!
+  char deviceId[32];  // Increased to 32 bytes for safety
+  sprintf(deviceId, "SCANNER_%02X%02X%02X%02X%02X%02X",
+          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+  Serial.printf("[DEVID] Generated device ID: %s\n", deviceId);
+  Serial.printf("[DEVID] Free heap after generation: %d bytes\n", ESP.getFreeHeap());
+
+  return String(deviceId);
+}
+
+// ─── Configuration Parser ─────────────────────────────────────────
+void parseConfigFile() {
+  Serial.println("\n[CONFIG] ═══ CONFIG PARSING START ═══");
+  Serial.printf("[CONFIG] Free heap: %d bytes\n", ESP.getFreeHeap());
+
+  if (!sdTakeMutex("parseConfig", 1000)) {
+    Serial.println("[CONFIG] ✗✗✗ FAILURE ✗✗✗ Could not acquire SD lock");
+    return;
+  }
+
+  File file = SD.open(CONFIG_FILE, FILE_READ);
+  if (!file) {
+    Serial.println("[CONFIG] ✗✗✗ FAILURE ✗✗✗ config.txt not found");
+    sdGiveMutex("parseConfig");
+    return;
+  }
+
+  Serial.println("[CONFIG] config.txt opened successfully");
+  int lineNum = 0;
+  int parsedKeys = 0;
+
+  while (file.available()) {
+    String line = file.readStringUntil('\n');
+    lineNum++;
+    line.trim();
+
+    if (line.length() == 0) {
+      Serial.printf("[CONFIG] Line %d: (empty, skipped)\n", lineNum);
+      continue;
+    }
+
+    int sepIndex = line.indexOf('=');
+    if (sepIndex == -1) {
+      Serial.printf("[CONFIG] Line %d: (no '=', skipped)\n", lineNum);
+      continue;
+    }
+
+    String key = line.substring(0, sepIndex);
+    String value = line.substring(sepIndex + 1);
+    key.trim();
+    value.trim();
+
+    Serial.printf("[CONFIG] Line %d: '%s' = '%s'\n", lineNum, key.c_str(), value.c_str());
+
+    if (key == "WIFI_SSID") { wifiSSID = value; parsedKeys++; }
+    else if (key == "WIFI_PASSWORD") { wifiPassword = value; parsedKeys++; }
+    else if (key == "ORCHESTRATOR_URL") { orchestratorURL = value; parsedKeys++; }
+    else if (key == "TEAM_ID") { teamID = value; parsedKeys++; }
+    else if (key == "DEVICE_ID") { deviceID = value; parsedKeys++; }
+    else {
+      Serial.printf("[CONFIG]         (unknown key, ignored)\n");
+    }
+  }
+
+  file.close();
+  sdGiveMutex("parseConfig");
+
+  Serial.printf("[CONFIG] Parsed %d lines, %d recognized keys\n", lineNum, parsedKeys);
+  Serial.println("[CONFIG] Results:");
+  Serial.printf("  WIFI_SSID: %s\n", wifiSSID.length() > 0 ? wifiSSID.c_str() : "(not set)");
+  Serial.printf("  WIFI_PASSWORD: %s\n", wifiPassword.length() > 0 ? "***" : "(not set)");
+  Serial.printf("  ORCHESTRATOR_URL: %s\n", orchestratorURL.length() > 0 ? orchestratorURL.c_str() : "(not set)");
+  Serial.printf("  TEAM_ID: %s\n", teamID.length() > 0 ? teamID.c_str() : "(not set)");
+  Serial.printf("  DEVICE_ID: %s\n", deviceID.length() > 0 ? deviceID.c_str() : "(auto-generate)");
+  Serial.printf("[CONFIG] Free heap after parsing: %d bytes\n", ESP.getFreeHeap());
+
+  // Validate required fields
+  bool configValid = true;
+  if (wifiSSID.length() == 0) {
+    Serial.println("[CONFIG] ✗ WIFI_SSID is required");
+    configValid = false;
+  }
+  if (orchestratorURL.length() == 0) {
+    Serial.println("[CONFIG] ✗ ORCHESTRATOR_URL is required");
+    configValid = false;
+  }
+  if (teamID.length() == 0) {
+    Serial.println("[CONFIG] ✗ TEAM_ID is required");
+    configValid = false;
+  }
+
+  if (configValid) {
+    Serial.println("[CONFIG] ✓✓✓ SUCCESS ✓✓✓ All required fields present");
+  } else {
+    Serial.println("[CONFIG] ✗✗✗ FAILURE ✗✗✗ Missing required fields");
+  }
+
+  Serial.println("[CONFIG] ═══ CONFIG PARSING END ═══\n");
+}
+
+// ─── Configuration Validation ─────────────────────────────────────
+bool validateConfig() {
+  Serial.println("\n[VALIDATE] ═══ CONFIG VALIDATION START ═══");
+  bool isValid = true;
+
+  // Validate WIFI_SSID (required, 1-32 characters)
+  if (wifiSSID.length() == 0) {
+    Serial.println("[VALIDATE] ✗ WIFI_SSID is required");
+    isValid = false;
+  } else if (wifiSSID.length() > 32) {
+    Serial.println("[VALIDATE] ✗ WIFI_SSID too long (max 32 characters)");
+    isValid = false;
+  } else {
+    Serial.printf("[VALIDATE] ✓ WIFI_SSID valid: %s\n", wifiSSID.c_str());
+  }
+
+  // Validate WIFI_PASSWORD (required, 0-63 characters - can be empty for open networks)
+  if (wifiPassword.length() > 63) {
+    Serial.println("[VALIDATE] ✗ WIFI_PASSWORD too long (max 63 characters)");
+    isValid = false;
+  } else {
+    Serial.println("[VALIDATE] ✓ WIFI_PASSWORD valid");
+  }
+
+  // Validate ORCHESTRATOR_URL (required, starts with http://, 10-200 characters)
+  if (orchestratorURL.length() == 0) {
+    Serial.println("[VALIDATE] ✗ ORCHESTRATOR_URL is required");
+    isValid = false;
+  } else if (!orchestratorURL.startsWith("http://")) {
+    Serial.println("[VALIDATE] ✗ ORCHESTRATOR_URL must start with http://");
+    isValid = false;
+  } else if (orchestratorURL.length() < 10 || orchestratorURL.length() > 200) {
+    Serial.println("[VALIDATE] ✗ ORCHESTRATOR_URL invalid length (10-200 characters)");
+    isValid = false;
+  } else {
+    Serial.printf("[VALIDATE] ✓ ORCHESTRATOR_URL valid: %s\n", orchestratorURL.c_str());
+  }
+
+  // Validate TEAM_ID (required, exactly 3 digits)
+  if (teamID.length() == 0) {
+    Serial.println("[VALIDATE] ✗ TEAM_ID is required");
+    isValid = false;
+  } else if (teamID.length() != 3) {
+    Serial.println("[VALIDATE] ✗ TEAM_ID must be exactly 3 digits");
+    isValid = false;
+  } else {
+    // Check all characters are digits
+    bool allDigits = true;
+    for (int i = 0; i < 3; i++) {
+      if (!isDigit(teamID[i])) {
+        allDigits = false;
+        break;
+      }
+    }
+    if (!allDigits) {
+      Serial.println("[VALIDATE] ✗ TEAM_ID must contain only digits");
+      isValid = false;
+    } else {
+      Serial.printf("[VALIDATE] ✓ TEAM_ID valid: %s\n", teamID.c_str());
+    }
+  }
+
+  // Validate DEVICE_ID (optional, 1-100 characters, alphanumeric + underscore)
+  if (deviceID.length() > 0) {
+    if (deviceID.length() > 100) {
+      Serial.println("[VALIDATE] ✗ DEVICE_ID too long (max 100 characters)");
+      isValid = false;
+    } else {
+      // Check all characters are alphanumeric or underscore
+      bool validChars = true;
+      for (unsigned int i = 0; i < deviceID.length(); i++) {
+        char c = deviceID[i];
+        if (!isAlphaNumeric(c) && c != '_') {
+          validChars = false;
+          break;
+        }
+      }
+      if (!validChars) {
+        Serial.println("[VALIDATE] ✗ DEVICE_ID must contain only letters, numbers, and underscores");
+        isValid = false;
+      } else {
+        Serial.printf("[VALIDATE] ✓ DEVICE_ID valid: %s\n", deviceID.c_str());
+      }
+    }
+  }
+
+  if (isValid) {
+    Serial.println("[VALIDATE] ✓✓✓ SUCCESS ✓✓✓ All fields valid");
+  } else {
+    Serial.println("[VALIDATE] ✗✗✗ FAILURE ✗✗✗ Configuration has errors");
+  }
+
+  Serial.println("[VALIDATE] ═══ CONFIG VALIDATION END ═══\n");
+  return isValid;
+}
+
+// ─── Device ID Persistence ────────────────────────────────────────
+void saveDeviceId(String devId) {
+  Serial.println("\n[DEVID-SAVE] ═══ SAVE DEVICE ID START ═══");
+  Serial.printf("[DEVID-SAVE] Saving device ID: %s\n", devId.c_str());
+
+  if (!sdTakeMutex("saveDevId", 1000)) {
+    Serial.println("[DEVID-SAVE] ✗✗✗ FAILURE ✗✗✗ Could not acquire SD lock");
+    return;
+  }
+
+  File file = SD.open(DEVICE_ID_FILE, FILE_WRITE);
+  if (!file) {
+    Serial.println("[DEVID-SAVE] ✗✗✗ FAILURE ✗✗✗ Could not open device_id.txt for writing");
+    sdGiveMutex("saveDevId");
+    return;
+  }
+
+  file.println(devId);
+  file.flush();
+  file.close();
+  sdGiveMutex("saveDevId");
+
+  Serial.println("[DEVID-SAVE] ✓✓✓ SUCCESS ✓✓✓ Device ID saved to /device_id.txt");
+  Serial.println("[DEVID-SAVE] ═══ SAVE DEVICE ID END ═══\n");
+}
+
+// ─── Token Database Synchronization ───────────────────────────────
+bool syncTokenDatabase() {
+  Serial.println("\n[TOKEN-SYNC] ═══ TOKEN DATABASE SYNC START ═══");
+  Serial.printf("[TOKEN-SYNC] Free heap: %d bytes\n", ESP.getFreeHeap());
+
+  if (orchestratorURL.length() == 0) {
+    Serial.println("[TOKEN-SYNC] ✗ Orchestrator URL not configured");
+    return false;
+  }
+
+  HTTPClient http;
+  String url = orchestratorURL + "/api/tokens";
+  Serial.printf("[TOKEN-SYNC] Fetching from: %s\n", url.c_str());
+
+  http.begin(url);
+  http.setTimeout(5000);  // 5-second timeout
+
+  int httpCode = http.GET();
+
+  if (httpCode == 200) {
+    String payload = http.getString();
+    http.end();
+
+    Serial.printf("[TOKEN-SYNC] Received %d bytes\n", payload.length());
+
+    // Save to SD card
+    if (!sdTakeMutex("syncTokenDB", 1000)) {
+      Serial.println("[TOKEN-SYNC] ✗✗✗ FAILURE ✗✗✗ Could not acquire SD lock");
+      return false;
+    }
+
+    File file = SD.open(TOKEN_DB_FILE, FILE_WRITE);
+    if (!file) {
+      Serial.println("[TOKEN-SYNC] ✗✗✗ FAILURE ✗✗✗ Could not open tokens.json for writing");
+      sdGiveMutex("syncTokenDB");
+      return false;
+    }
+
+    file.print(payload);
+    file.flush();
+    file.close();
+    sdGiveMutex("syncTokenDB");
+
+    Serial.println("[TOKEN-SYNC] ✓✓✓ SUCCESS ✓✓✓ Token database synced and saved");
+    Serial.printf("[TOKEN-SYNC] Free heap after sync: %d bytes\n", ESP.getFreeHeap());
+    Serial.println("[TOKEN-SYNC] ═══ TOKEN DATABASE SYNC END ═══\n");
+    return true;
+
+  } else {
+    Serial.printf("[TOKEN-SYNC] ✗✗✗ FAILURE ✗✗✗ HTTP request failed (code: %d)\n", httpCode);
+    http.end();
+    Serial.println("[TOKEN-SYNC] ═══ TOKEN DATABASE SYNC END ═══\n");
+    return false;
+  }
+}
+
+// ─── Network Operations ───────────────────────────────────────────
+bool checkOrchestratorHealth() {
+  if (orchestratorURL.length() == 0) return false;
+
+  HTTPClient http;
+  http.begin(orchestratorURL + "/health");
+  http.setTimeout(5000);
+
+  int httpCode = http.GET();
+  http.end();
+
+  return (httpCode == 200);
+}
+
+bool sendScan(String tokenId, String teamId, String deviceId, String timestamp) {
+  Serial.println("\n[SEND] ═══ HTTP POST /api/scan START ═══");
+  Serial.printf("[SEND] Free heap: %d bytes\n", ESP.getFreeHeap());
+  unsigned long startMs = millis();
+
+  if (orchestratorURL.length() == 0) {
+    Serial.println("[SEND] ✗✗✗ FAILURE ✗✗✗ No orchestrator URL configured");
+    Serial.println("[SEND] ═══ HTTP POST /api/scan END ═══\n");
+    return false;
+  }
+
+  JsonDocument doc;
+  doc["tokenId"] = tokenId;
+  if (teamId.length() > 0) doc["teamId"] = teamId;
+  doc["deviceId"] = deviceId;
+  doc["timestamp"] = timestamp;
+
+  String requestBody;
+  serializeJson(doc, requestBody);
+
+  Serial.printf("[SEND] URL: %s/api/scan\n", orchestratorURL.c_str());
+  Serial.printf("[SEND] Payload: %s\n", requestBody.c_str());
+  Serial.printf("[SEND] Payload size: %d bytes\n", requestBody.length());
+
+  HTTPClient http;
+  http.begin(orchestratorURL + "/api/scan");
+  http.addHeader("Content-Type", "application/json");
+  http.setTimeout(5000);
+
+  Serial.println("[SEND] Sending HTTP POST request...");
+  int httpCode = http.POST(requestBody);
+  unsigned long latencyMs = millis() - startMs;
+
+  Serial.printf("[SEND] HTTP response code: %d\n", httpCode);
+  Serial.printf("[SEND] Request latency: %lu ms\n", latencyMs);
+
+  // Read response body before closing connection
+  String responseBody = "";
+  if (httpCode > 0) {
+    responseBody = http.getString();
+    if (responseBody.length() > 0) {
+      Serial.printf("[SEND] Response body: %s\n", responseBody.c_str());
+    }
+  } else {
+    Serial.printf("[SEND] ✗ HTTP Error: %s\n", http.errorToString(httpCode).c_str());
+  }
+
+  http.end();
+
+  // Accept 2xx success codes AND 409 Conflict (orchestrator received scan, handles duplicate)
+  bool success = (httpCode >= 200 && httpCode < 300) || (httpCode == 409);
+
+  if (success) {
+    if (httpCode == 409) {
+      Serial.println("[SEND] ✓ 409 Conflict - orchestrator received scan (duplicate handled)");
+    } else {
+      Serial.printf("[SEND] ✓✓✓ SUCCESS ✓✓✓ HTTP %d received\n", httpCode);
+    }
+  } else {
+    Serial.printf("[SEND] ✗✗✗ FAILURE ✗✗✗ HTTP %d (will queue)\n", httpCode);
+  }
+
+  Serial.printf("[SEND] Free heap after send: %d bytes\n", ESP.getFreeHeap());
+  Serial.println("[SEND] ═══ HTTP POST /api/scan END ═══\n");
+
+  return success;
+}
+
+/**
+ * Upload queue batch to orchestrator (Phase 6 - US4)
+ * Reads up to 10 entries, sends via POST /api/scan/batch
+ * Recursively uploads remaining batches with 1s delay
+ *
+ * @return true if all uploads successful, false on error
+ */
+bool uploadQueueBatch() {
+  Serial.println("\n[BATCH] ═══════════════════════════════════");
+  Serial.println("[BATCH]   QUEUE BATCH UPLOAD START");
+  Serial.println("[BATCH] ═══════════════════════════════════");
+  Serial.printf("[BATCH] Free heap before: %d bytes\n", ESP.getFreeHeap());
+  Serial.printf("[BATCH] Current queue size: %d entries\n", getQueueSize());
+
+  // Acquire SD mutex to read queue
+  if (!sdTakeMutex("uploadBatch", 1000)) {
+    Serial.println("[BATCH] ✗✗✗ FAILURE ✗✗✗ Could not acquire SD mutex");
+    Serial.println("[BATCH] ═══════════════════════════════════\n");
+    return false;
+  }
+
+  // Read batch of up to 10 entries
+  std::vector<QueueEntry> entries;
+  readQueue(entries, 10);
+
+  sdGiveMutex("uploadBatch");
+
+  if (entries.empty()) {
+    Serial.println("[BATCH] Queue is empty, nothing to upload");
+    Serial.println("[BATCH] ═══════════════════════════════════\n");
+    return true;
+  }
+
+  Serial.printf("[BATCH] Uploading batch of %zu entries\n", entries.size());
+
+  // Create batch request JSON
+  JsonDocument doc;
+  JsonArray transactions = doc["transactions"].to<JsonArray>();
+
+  for (QueueEntry& entry : entries) {
+    JsonObject transaction = transactions.add<JsonObject>();
+    transaction["tokenId"] = entry.tokenId;
+    if (entry.teamId.length() > 0) transaction["teamId"] = entry.teamId;
+    transaction["deviceId"] = entry.deviceId;
+    transaction["timestamp"] = entry.timestamp;
+  }
+
+  String requestBody;
+  serializeJson(doc, requestBody);
+
+  Serial.printf("[BATCH] Request body size: %d bytes\n", requestBody.length());
+
+  // HTTP POST to /api/scan/batch
+  HTTPClient http;
+  http.begin(orchestratorURL + "/api/scan/batch");
+  http.addHeader("Content-Type", "application/json");
+  http.setTimeout(5000);
+
+  unsigned long startTime = millis();
+  int httpCode = http.POST(requestBody);
+  unsigned long latency = millis() - startTime;
+
+  // Read response body before closing
+  String responseBody = "";
+  if (httpCode > 0) {
+    responseBody = http.getString();
+    if (responseBody.length() > 0 && responseBody.length() < 200) {
+      Serial.printf("[BATCH] Response: %s\n", responseBody.c_str());
+    }
+  } else {
+    Serial.printf("[BATCH] ✗ HTTP Error: %s\n", http.errorToString(httpCode).c_str());
+  }
+
+  http.end();
+
+  Serial.printf("[BATCH] HTTP %d response, latency: %lu ms\n", httpCode, latency);
+
+  if (httpCode == 200) {
+    Serial.println("[BATCH] ✓✓✓ SUCCESS ✓✓✓ Batch upload successful");
+
+    // Remove uploaded entries from queue
+    if (sdTakeMutex("removeUploaded", 1000)) {
+      removeUploadedEntries(entries.size());
+      sdGiveMutex("removeUploaded");
+    } else {
+      Serial.println("[BATCH] WARNING: Could not remove uploaded entries (mutex timeout)");
+    }
+
+    // Check if more entries remain
+    int remainingSize = getQueueSize();
+    Serial.printf("[BATCH] Queue size after upload: %d entries\n", remainingSize);
+
+    if (remainingSize > 0) {
+      Serial.println("[BATCH] More entries in queue, uploading next batch after 1s delay");
+      Serial.println("[BATCH] ═══════════════════════════════════\n");
+      delay(1000);  // 1-second delay between batches
+      return uploadQueueBatch(); // Recursive upload
+    }
+
+    Serial.printf("[BATCH] Free heap after: %d bytes\n", ESP.getFreeHeap());
+    Serial.println("[BATCH] ✓ All queue entries uploaded");
+    Serial.println("[BATCH] ═══════════════════════════════════\n");
+    return true;
+
+  } else {
+    Serial.printf("[BATCH] ✗✗✗ FAILURE ✗✗✗ HTTP %d\n", httpCode);
+    Serial.println("[BATCH] Entries remain in queue for retry on next health check");
+    Serial.println("[BATCH] ═══════════════════════════════════\n");
+    return false;
+  }
+}
+
+// ─── Queue Operations ─────────────────────────────────────────────
+void queueScan(String tokenId, String teamId, String deviceId, String timestamp) {
+  Serial.println("\n[QUEUE] ═══ QUEUE SCAN START ═══");
+  Serial.printf("[QUEUE] Free heap: %d bytes\n", ESP.getFreeHeap());
+  unsigned long startMs = millis();
+
+  if (!sdTakeMutex("queueScan", 500)) {
+    Serial.println("[QUEUE] ✗✗✗ FAILURE ✗✗✗ Failed to acquire SD mutex (timeout)");
+    Serial.println("[QUEUE] ═══ QUEUE SCAN END ═══\n");
+    return;
+  }
+
+  // Create JSON
+  JsonDocument doc;
+  doc["tokenId"] = tokenId;
+  if (teamId.length() > 0) doc["teamId"] = teamId;
+  doc["deviceId"] = deviceId;
+  doc["timestamp"] = timestamp;
+
+  String jsonLine;
+  serializeJson(doc, jsonLine);
+
+  Serial.printf("[QUEUE] Entry: %s\n", jsonLine.c_str());
+  Serial.printf("[QUEUE] Entry size: %d bytes\n", jsonLine.length());
+
+  // Append to file
+  Serial.printf("[QUEUE] Opening %s for append...\n", QUEUE_FILE);
+  File file = SD.open(QUEUE_FILE, FILE_APPEND);
+
+  if (file) {
+    unsigned long fileSize = file.size();
+    Serial.printf("[QUEUE] File opened, current size: %lu bytes\n", fileSize);
+
+    file.println(jsonLine);
+    file.flush();
+    file.close();
+
+    updateQueueSize(1);
+    int newQueueSize = getQueueSize();
+    unsigned long latencyMs = millis() - startMs;
+
+    Serial.printf("[QUEUE] ✓✓✓ SUCCESS ✓✓✓ Scan queued (token: %s)\n", tokenId.c_str());
+    Serial.printf("[QUEUE] Queue size: %d entries\n", newQueueSize);
+    Serial.printf("[QUEUE] Write latency: %lu ms\n", latencyMs);
+  } else {
+    Serial.printf("[QUEUE] ✗✗✗ FAILURE ✗✗✗ Could not open %s for writing\n", QUEUE_FILE);
+  }
+
+  sdGiveMutex("queueScan");
+
+  Serial.printf("[QUEUE] Free heap after queue: %d bytes\n", ESP.getFreeHeap());
+  Serial.println("[QUEUE] ═══ QUEUE SCAN END ═══\n");
+}
+
+int countQueueEntries() {
+  // Must be called with SD mutex held
+  File file = SD.open(QUEUE_FILE, FILE_READ);
+  if (!file) return 0;
+
+  int count = 0;
+  while (file.available()) {
+    String line = file.readStringUntil('\n');
+    line.trim();
+    if (line.length() > 0) count++;
+  }
+
+  file.close();
+  return count;
+}
+
+/**
+ * Read queue entries from JSONL file (Phase 6 - US4)
+ * Must be called with SD mutex already acquired
+ *
+ * @param entries Vector to populate with queue entries
+ * @param maxEntries Maximum number of entries to read (default 10 for batch upload)
+ */
+void readQueue(std::vector<QueueEntry>& entries, int maxEntries) {
+  Serial.println("\n[QUEUE-READ] ═══ READING QUEUE BATCH ═══");
+  Serial.printf("[QUEUE-READ] Max entries: %d\n", maxEntries);
+
+  File file = SD.open(QUEUE_FILE, FILE_READ);
+  if (!file) {
+    Serial.println("[QUEUE-READ] ✗ Queue file not found");
+    return;
+  }
+
+  int count = 0;
+  int skipped = 0;
+
+  while (file.available() && count < maxEntries) {
+    String line = file.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0) continue;
+
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, line);
+
+    if (error == DeserializationError::Ok) {
+      // Validate required fields
+      if (doc.containsKey("tokenId") && doc.containsKey("deviceId") && doc.containsKey("timestamp")) {
+        QueueEntry entry;
+        entry.tokenId = doc["tokenId"].as<String>();
+        entry.teamId = doc.containsKey("teamId") ? doc["teamId"].as<String>() : "";
+        entry.deviceId = doc["deviceId"].as<String>();
+        entry.timestamp = doc["timestamp"].as<String>();
+        entries.push_back(entry);
+        count++;
+
+        Serial.printf("[QUEUE-READ] Entry %d: tokenId=%s\n", count, entry.tokenId.c_str());
+      } else {
+        skipped++;
+        Serial.printf("[QUEUE-READ] ✗ Skipped line (missing fields): %s\n", line.c_str());
+      }
+    } else {
+      skipped++;
+      Serial.printf("[QUEUE-READ] ✗ Skipped corrupt line: %s\n", line.c_str());
+    }
+  }
+
+  file.close();
+
+  Serial.printf("[QUEUE-READ] ✓ Read %d entries, skipped %d corrupt\n", count, skipped);
+  Serial.println("[QUEUE-READ] ═══ READING COMPLETE ═══\n");
+}
+
+/**
+ * Remove first N entries from queue (FIFO) (Phase 6 - US4)
+ * Must be called with SD mutex already acquired
+ *
+ * @param numEntries Number of entries to remove from front of queue
+ */
+void removeUploadedEntries(int numEntries) {
+  Serial.println("\n[QUEUE-REMOVE] ═══ REMOVING UPLOADED ENTRIES ═══");
+  Serial.printf("[QUEUE-REMOVE] Entries to remove: %d\n", numEntries);
+
+  // Read all lines into memory
+  std::vector<String> allLines;
+  File file = SD.open(QUEUE_FILE, FILE_READ);
+  if (file) {
+    while (file.available()) {
+      String line = file.readStringUntil('\n');
+      line.trim();
+      if (line.length() > 0) allLines.push_back(line);
+    }
+    file.close();
+  }
+
+  Serial.printf("[QUEUE-REMOVE] Total lines in queue: %zu\n", allLines.size());
+
+  if (numEntries >= allLines.size()) {
+    // Remove entire queue
+    SD.remove(QUEUE_FILE);
+    updateQueueSize(-allLines.size());
+    Serial.printf("[QUEUE-REMOVE] ✓ Entire queue removed (%zu entries)\n", allLines.size());
+    Serial.println("[QUEUE-REMOVE] ═══ REMOVAL COMPLETE ═══\n");
+    return;
+  }
+
+  // Remove first N entries (FIFO)
+  allLines.erase(allLines.begin(), allLines.begin() + numEntries);
+  updateQueueSize(-numEntries);
+
+  Serial.printf("[QUEUE-REMOVE] Remaining entries: %zu\n", allLines.size());
+
+  // Rewrite queue file with remaining entries
+  SD.remove(QUEUE_FILE);
+  file = SD.open(QUEUE_FILE, FILE_WRITE);
+  if (file) {
+    for (String& line : allLines) {
+      file.println(line);
+    }
+    file.flush();
+    file.close();
+    Serial.printf("[QUEUE-REMOVE] ✓ Queue rewritten with %zu entries\n", allLines.size());
+  } else {
+    Serial.println("[QUEUE-REMOVE] ✗✗✗ ERROR: Could not rewrite queue file");
+  }
+
+  Serial.println("[QUEUE-REMOVE] ═══ REMOVAL COMPLETE ═══\n");
+}
+
+// ─── Token Database ───────────────────────────────────────────────
+void loadTokenDatabase() {
+  if (!sdTakeMutex("loadTokenDB", 1000)) {
+    Serial.println("[TOKEN-DB] Could not acquire SD mutex");
+    return;
+  }
+
+  File file = SD.open(TOKEN_DB_FILE, FILE_READ);
+  if (!file) {
+    Serial.println("[TOKEN-DB] tokens.json not found");
+    sdGiveMutex("loadTokenDB");
+    return;
+  }
+
+  // Parse JSON (simplified - load into array)
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, file);
+  file.close();
+  sdGiveMutex("loadTokenDB");
+
+  if (error) {
+    Serial.printf("[TOKEN-DB] Parse error: %s\n", error.c_str());
+    return;
+  }
+
+  // Extract tokens
+  JsonObject tokens = doc["tokens"];
+  tokenDatabaseSize = 0;
+
+  for (JsonPair kv : tokens) {
+    if (tokenDatabaseSize >= MAX_TOKENS) break;
+
+    TokenMetadata &token = tokenDatabase[tokenDatabaseSize];
+    token.tokenId = String(kv.key().c_str());
+
+    JsonObject tokenData = kv.value();
+    token.video = tokenData["video"] | "";
+    token.image = tokenData["image"] | "";
+    token.audio = tokenData["audio"] | "";
+    token.processingImage = tokenData["processingImage"] | "";
+
+    tokenDatabaseSize++;
+  }
+
+  Serial.printf("[TOKEN-DB] Loaded %d tokens\n", tokenDatabaseSize);
+}
+
+TokenMetadata* getTokenMetadata(String tokenId) {
+  for (int i = 0; i < tokenDatabaseSize; i++) {
+    if (tokenDatabase[i].tokenId == tokenId) {
+      return &tokenDatabase[i];
+    }
+  }
+  return nullptr;
+}
+
+// ─── Video Token Detection Helpers (Phase 5) ─────────────────────
+
+// T096: Check if token has video field (non-null, non-empty)
+bool hasVideoField(TokenMetadata* metadata) {
+  if (metadata == nullptr) return false;
+  return (metadata->video.length() > 0 && metadata->video != "null");
+}
+
+// T097: Extract processing image path from metadata, convert to absolute SD path
+String getProcessingImagePath(TokenMetadata* metadata, String tokenId) {
+  if (metadata == nullptr) return "";
+  if (metadata->processingImage.length() == 0) return "";
+  if (metadata->processingImage == "null") return "";
+
+  // Extract file extension from processingImage field
+  // (ignore any path components - just get the extension)
+  String extension = "";
+  int lastDot = metadata->processingImage.lastIndexOf('.');
+  if (lastDot >= 0) {
+    extension = metadata->processingImage.substring(lastDot); // e.g., ".jpg", ".png", ".bmp"
+  } else {
+    extension = ".bmp"; // Default extension matches regular images
+  }
+
+  // Construct path from tokenId (same pattern as regular images)
+  // Regular images: /images/{tokenId}.bmp
+  // Processing images: /images/{tokenId}{extension}
+  return "/images/" + tokenId + extension;
+}
+
+// T099-T102: Display processing image with "Sending..." overlay and fallback
+void displayProcessingImage(String imagePath) {
+  Serial.println("\n[PROC_IMG] ═══ PROCESSING IMAGE DISPLAY START ═══");
+  Serial.printf("[PROC_IMG] Image path: %s\n", imagePath.length() > 0 ? imagePath.c_str() : "(empty)");
+  Serial.printf("[PROC_IMG] Free heap: %d bytes\n", ESP.getFreeHeap());
+
+  bool imageLoaded = false;
+
+  // T099: Load processing image from SD card (if path provided and file exists)
+  if (imagePath.length() > 0) {
+    Serial.printf("[PROC_IMG] Checking file existence: %s\n", imagePath.c_str());
+    if (SD.exists(imagePath.c_str())) {
+      Serial.printf("[PROC_IMG] Loading image: %s\n", imagePath.c_str());
+      drawBmp(imagePath); // Reuse existing Constitution-compliant BMP display function
+      imageLoaded = true;
+      Serial.println("[PROC_IMG] ✓ Image loaded successfully");
+    } else {
+      Serial.printf("[PROC_IMG] ✗ Image file not found: %s\n", imagePath.c_str());
+    }
+  } else {
+    Serial.println("[PROC_IMG] No processing image path provided");
+  }
+
+  // T101: Fallback display for missing processingImage
+  if (!imageLoaded) {
+    Serial.println("[PROC_IMG] Using fallback: text-only display");
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setTextSize(3);
+    tft.setCursor(40, 100);
+    tft.println("Sending...");
+  }
+
+  // T100: Add "Sending..." text overlay (regardless of image load success)
+  // Display overlay at bottom of screen for visual feedback
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(3);
+  tft.setCursor(40, 200); // Bottom of screen (240x320 display)
+  tft.println("Sending...");
+  Serial.println("[PROC_IMG] ✓ Overlay added: 'Sending...'");
+
+  Serial.printf("[PROC_IMG] Free heap after display: %d bytes\n", ESP.getFreeHeap());
+
+  // T102: Auto-hide modal after 2.5 seconds
+  Serial.println("[PROC_IMG] Starting 2.5s auto-hide timer...");
+  unsigned long timerStart = millis();
+  delay(2500);
+  unsigned long timerActual = millis() - timerStart;
+  Serial.printf("[PROC_IMG] ✓ Timer complete (actual: %lu ms)\n", timerActual);
+
+  Serial.println("[PROC_IMG] ═══ PROCESSING IMAGE DISPLAY END ═══\n");
+}
+
+// ─── WiFi Initialization ──────────────────────────────────────────
+void WiFiEventHandler(WiFiEvent_t event) {
+  switch(event) {
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      Serial.printf("[%lu] [WIFI] Connected to AP\n", millis());
+      Serial.printf("        SSID: %s, Channel: %d\n", WiFi.SSID().c_str(), WiFi.channel());
+      break;
+
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      Serial.printf("[%lu] [WIFI] Got IP address: %s\n", millis(), WiFi.localIP().toString().c_str());
+      Serial.printf("        Gateway: %s, Signal: %d dBm\n", WiFi.gatewayIP().toString().c_str(), WiFi.RSSI());
+      setConnectionState(ORCH_WIFI_CONNECTED);
+      break;
+
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      Serial.printf("[%lu] [WIFI] Disconnected from AP\n", millis());
+      setConnectionState(ORCH_DISCONNECTED);
+      // WiFi will auto-reconnect, don't call WiFi.reconnect() here to avoid storm
+      break;
+
+    default:
+      break;
+  }
+}
+
+void initWiFiConnection() {
+  if (wifiSSID.length() == 0) {
+    Serial.println("[WIFI] No SSID configured, skipping WiFi");
+    return;
+  }
+
+  Serial.println("\n[WIFI] ═══ WIFI CONNECTION START ═══");
+
+  WiFi.onEvent(WiFiEventHandler);
+  WiFi.mode(WIFI_STA);
+  Serial.printf("[WIFI] SSID: %s\n", wifiSSID.c_str());
+  Serial.printf("[WIFI] Free heap before connection: %d bytes\n", ESP.getFreeHeap());
+
+  WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+
+  Serial.println("[WIFI] Waiting for connection (timeout: 10s)...");
+  unsigned long startTime = millis();
+  int dots = 0;
+
+  while (WiFi.status() != WL_CONNECTED && millis() - startTime < 10000) {
+    delay(500);
+    Serial.print(".");
+    dots++;
+    if (dots % 20 == 0) Serial.println();  // New line every 10 seconds
+  }
+  Serial.println();  // End dots line
+
+  unsigned long connectionTime = millis() - startTime;
+
+  if (WiFi.status() == WL_CONNECTED) {
+    setConnectionState(ORCH_WIFI_CONNECTED);
+    Serial.printf("[WIFI] ✓✓✓ SUCCESS ✓✓✓ Connected in %lu ms\n", connectionTime);
+    Serial.printf("[WIFI] IP Address: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("[WIFI] Gateway: %s\n", WiFi.gatewayIP().toString().c_str());
+    Serial.printf("[WIFI] Signal Strength: %d dBm\n", WiFi.RSSI());
+    Serial.printf("[WIFI] Channel: %d\n", WiFi.channel());
+
+    // Check orchestrator
+    Serial.println("\n[ORCH] Checking orchestrator health...");
+    Serial.printf("[ORCH] URL: %s/health\n", orchestratorURL.c_str());
+
+    if (checkOrchestratorHealth()) {
+      setConnectionState(ORCH_CONNECTED);
+      Serial.println("[ORCH] ✓✓✓ SUCCESS ✓✓✓ Orchestrator reachable");
+    } else {
+      Serial.println("[ORCH] ✗✗✗ FAILURE ✗✗✗ Orchestrator offline");
+    }
+  } else {
+    Serial.printf("[WIFI] ✗✗✗ FAILURE ✗✗✗ Connection timeout after %lu ms\n", connectionTime);
+    setConnectionState(ORCH_DISCONNECTED);
+  }
+
+  Serial.printf("[WIFI] Free heap after connection: %d bytes\n", ESP.getFreeHeap());
+  Serial.println("[WIFI] ═══ WIFI CONNECTION END ═══\n");
+}
+
+// ─── Background Task (Connection Monitor) ────────────────────────
+void backgroundTask(void* parameter) {
+  Serial.println("[BG-TASK] Background task started on Core 0");
+
+  unsigned long lastCheck = 0;
+  const unsigned long checkInterval = 10000; // 10 seconds
+
+  while (true) {
+    unsigned long now = millis();
+
+    // Stack monitoring (Phase 6 - check for stack overflow risk)
+    UBaseType_t stackRemaining = uxTaskGetStackHighWaterMark(NULL);
+    if (stackRemaining < 512) {
+      Serial.printf("[BG-TASK] ⚠️ WARNING: Low stack! Only %d bytes free\n", stackRemaining);
+    }
+
+    if (now - lastCheck > checkInterval) {
+      lastCheck = now;
+
+      // Log stack health every 10 seconds
+      Serial.printf("[BG-TASK] Stack high water mark: %d bytes free\n", stackRemaining);
+
+      ConnectionState state = getConnectionState();
+
+      if (state == ORCH_WIFI_CONNECTED || state == ORCH_CONNECTED) {
+        // Check orchestrator health
+        if (checkOrchestratorHealth()) {
+          if (state != ORCH_CONNECTED) {
+            Serial.println("[BG-TASK] Orchestrator now reachable");
+            setConnectionState(ORCH_CONNECTED);
+          }
+
+          // Phase 6: Upload queue if not empty
+          int queueSize = getQueueSize();
+          if (queueSize > 0) {
+            Serial.printf("[BG-TASK] Queue has %d entries, starting batch upload\n", queueSize);
+            uploadQueueBatch();
+          }
+        } else {
+          if (state == ORCH_CONNECTED) {
+            Serial.println("[BG-TASK] Orchestrator unreachable");
+            setConnectionState(ORCH_WIFI_CONNECTED);
+          }
+        }
+      }
+    }
+
+    delay(100);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
 
 // ─── Setup Function ───────────────────────────────────────────────
 void setup() {
@@ -1062,9 +2224,15 @@ void setup() {
     
     Serial.begin(115200);
     delay(3000);  // INCREASED: MFRC522 library delays serial init on ST7789
-    Serial.println("\n━━━ CYD RFID Scanner v3.4 ━━━");
-    Serial.println("Fixed NDEF Parsing + CollReg Handling");
-    Serial.printf("Free heap at start: %d bytes\n", ESP.getFreeHeap());
+    Serial.println("\n━━━ CYD RFID Scanner v4.0 (Orchestrator Integration) ━━━");
+    Serial.println("Based on v3.4 - Fixed NDEF Parsing + CollReg Handling");
+
+    // Print reset reason FIRST - critical for debugging crashes
+    printResetReason();
+
+    Serial.printf("[BOOT] Free heap at start: %d bytes\n", ESP.getFreeHeap());
+    Serial.printf("[BOOT] Chip model: ESP32, %d cores, %d MHz\n",
+                  ESP.getChipCores(), ESP.getCpuFreqMHz());
     
     // Silence DAC pins to prevent electrical noise/beeping from RFID polling
     pinMode(25, OUTPUT);
@@ -1095,7 +2263,147 @@ void setup() {
         tft.println("SD OK");
         sdCardPresent = true;
     }
-    
+
+    // ═══ ORCHESTRATOR INTEGRATION (v4.0) ═══════════════════════════
+    Serial.println("\n[ORCH] ════════════════════════════════════════");
+    Serial.println("[ORCH]   ORCHESTRATOR INTEGRATION START");
+    Serial.println("[ORCH] ════════════════════════════════════════");
+    Serial.printf("[ORCH] Free heap at orchestrator start: %d bytes\n", ESP.getFreeHeap());
+
+    if (sdCardPresent) {
+        // Create SD mutex for orchestrator operations
+        Serial.println("\n[ORCH] Creating SD mutex for orchestrator operations...");
+        sdMutex = xSemaphoreCreateMutex();
+        if (sdMutex) {
+            Serial.println("[ORCH] ✓ SD mutex created successfully");
+        } else {
+            Serial.println("[ORCH] ✗✗✗ FATAL ✗✗✗ Failed to create SD mutex");
+        }
+
+        // Parse configuration file
+        Serial.println("[ORCH] Reading config.txt...");
+        parseConfigFile();
+
+        // Validate configuration
+        bool configValid = validateConfig();
+        if (!configValid) {
+            Serial.println("[ORCH] ✗✗✗ Configuration validation failed");
+            tft.setTextColor(TFT_RED, TFT_BLACK);
+            tft.println("Config Error!");
+            if (wifiSSID.length() == 0) tft.println("Missing WIFI_SSID");
+            if (wifiSSID.length() > 32) tft.println("SSID too long");
+            if (orchestratorURL.length() == 0) tft.println("Missing URL");
+            if (!orchestratorURL.startsWith("http://")) tft.println("URL must be HTTP");
+            if (teamID.length() == 0) tft.println("Missing TEAM_ID");
+            if (teamID.length() != 3) tft.println("TEAM_ID: 3 digits");
+            tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+            // Continue in offline mode even with invalid config
+        }
+
+        // Generate device ID if not configured
+        // NOTE: esp_read_mac() reads from eFuse, does NOT require WiFi initialization
+        if (deviceID.length() == 0) {
+            Serial.println("\n[DEVID] ═══ DEVICE ID GENERATION START ═══");
+            deviceID = generateDeviceId();
+            Serial.printf("[DEVID] Auto-generated device ID: %s\n", deviceID.c_str());
+
+            // Persist generated device ID to SD card
+            saveDeviceId(deviceID);
+
+            Serial.println("[DEVID] ═══ DEVICE ID GENERATION END ═══\n");
+        } else {
+            Serial.printf("[DEVID] Using configured device ID: %s\n", deviceID.c_str());
+        }
+
+        // Initialize queue size cache
+        if (sdTakeMutex("queueInit", 1000)) {
+            queueSizeCached = countQueueEntries();
+            sdGiveMutex("queueInit");
+            Serial.printf("[ORCH] Queue size at boot: %d\n", queueSizeCached);
+        }
+
+        // Initialize WiFi if configured
+        bool tokenSyncSuccess = false;
+        if (wifiSSID.length() > 0) {
+            tft.println("Connecting WiFi...");
+            initWiFiConnection();
+
+            // Display connection status
+            ConnectionState state = getConnectionState();
+            if (state == ORCH_CONNECTED) {
+                tft.println("Connected!");
+
+                // Try to sync token database from orchestrator
+                tft.println("Syncing tokens...");
+                tokenSyncSuccess = syncTokenDatabase();
+
+                if (tokenSyncSuccess) {
+                    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+                    tft.println("Tokens: Synced");
+                    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+                } else {
+                    tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+                    tft.println("Tokens: Sync Failed");
+                    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+                }
+            } else if (state == ORCH_WIFI_CONNECTED) {
+                tft.println("WiFi OK / Orch Offline");
+                tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+                tft.println("Tokens: Using Cache");
+                tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+            } else {
+                tft.println("WiFi Failed");
+                tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+                tft.println("Tokens: Using Cache");
+                tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+            }
+        } else {
+            Serial.println("[ORCH] No WiFi configured, offline mode");
+            tft.println("Offline Mode");
+            tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+            tft.println("Tokens: Using Cache");
+            tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+        }
+
+        // Load token database from SD card (either synced or cached)
+        Serial.println("[ORCH] Loading token database...");
+        loadTokenDatabase();
+
+        // Display token database status on TFT
+        if (tokenDatabaseSize > 0) {
+            tft.setTextColor(TFT_GREEN, TFT_BLACK);
+            tft.printf("Loaded: %d tokens\n", tokenDatabaseSize);
+            tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+        } else {
+            tft.setTextColor(TFT_RED, TFT_BLACK);
+            tft.println("No Token Database!");
+            tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+        }
+
+        // Create background task on Core 0 (connection monitoring)
+        if (wifiSSID.length() > 0) {
+            xTaskCreatePinnedToCore(
+                backgroundTask,
+                "OrchestratorBG",
+                16384,  // 16KB stack (proven in test-42)
+                NULL,
+                1,      // Priority
+                NULL,
+                0       // Core 0
+            );
+            Serial.println("[ORCH] Background task created on Core 0");
+        }
+    } else {
+        Serial.println("\n[ORCH] No SD card, orchestrator features disabled");
+        tft.println("No Orchestrator");
+    }
+
+    Serial.printf("[ORCH] Free heap at orchestrator end: %d bytes\n", ESP.getFreeHeap());
+    Serial.println("[ORCH] ════════════════════════════════════════");
+    Serial.println("[ORCH]   ORCHESTRATOR INTEGRATION END");
+    Serial.println("[ORCH] ════════════════════════════════════════\n");
+    // ═══════════════════════════════════════════════════════════════
+
     // Configure Touch Interrupt
     // CRITICAL: GPIO36 is input-only, cannot use INPUT_PULLUP!
     pinMode(TOUCH_IRQ, INPUT);  // FIX: Use INPUT instead of INPUT_PULLUP
@@ -1202,6 +2510,195 @@ void setup() {
 
 // ─── Main Loop ────────────────────────────────────────────────────
 void loop() {
+    // ═══ Serial Command Interface (Orchestrator Debug) ═══════════
+    if (Serial.available()) {
+        String cmd = Serial.readStringUntil('\n');
+        cmd.trim();
+
+        if (cmd == "CONFIG") {
+            Serial.println("\n=== Configuration ===");
+            Serial.printf("WiFi SSID: %s\n", wifiSSID.c_str());
+            Serial.printf("WiFi Password: %s\n", wifiPassword.length() > 0 ? "***" : "(none)");
+            Serial.printf("Orchestrator URL: %s\n", orchestratorURL.c_str());
+            Serial.printf("Team ID: %s\n", teamID.c_str());
+            Serial.printf("Device ID: %s\n", deviceID.c_str());
+            Serial.println("====================\n");
+
+        } else if (cmd == "STATUS") {
+            ConnectionState state = getConnectionState();
+            Serial.println("\n=== Orchestrator Status ===");
+            Serial.printf("Connection: ");
+            switch (state) {
+                case ORCH_DISCONNECTED:
+                    Serial.println("DISCONNECTED");
+                    break;
+                case ORCH_WIFI_CONNECTED:
+                    Serial.printf("WIFI_CONNECTED (%s)\n", WiFi.localIP().toString().c_str());
+                    break;
+                case ORCH_CONNECTED:
+                    Serial.printf("CONNECTED (%s + orchestrator)\n", WiFi.localIP().toString().c_str());
+                    break;
+            }
+            Serial.printf("Queue size: %d entries\n", getQueueSize());
+            Serial.printf("Token database: %d tokens loaded\n", tokenDatabaseSize);
+            Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
+            Serial.println("===========================\n");
+
+        } else if (cmd == "TOKENS") {
+            Serial.println("\n=== Token Database ===");
+            Serial.printf("Total tokens: %d\n", tokenDatabaseSize);
+            for (int i = 0; i < min(10, tokenDatabaseSize); i++) {
+                Serial.printf("  %s: video=%s, image=%s\n",
+                    tokenDatabase[i].tokenId.c_str(),
+                    tokenDatabase[i].video.length() > 0 ? tokenDatabase[i].video.c_str() : "(none)",
+                    tokenDatabase[i].image.length() > 0 ? tokenDatabase[i].image.c_str() : "(none)");
+            }
+            if (tokenDatabaseSize > 10) {
+                Serial.printf("  ... and %d more\n", tokenDatabaseSize - 10);
+            }
+            Serial.println("======================\n");
+
+        } else if (cmd.startsWith("TEST_VIDEO:")) {
+            // Phase 5: Test video token detection helpers
+            String tokenId = cmd.substring(11);
+            tokenId.trim();
+            Serial.println("\n=== Phase 5: Video Token Test ===");
+            Serial.printf("Testing token ID: %s\n", tokenId.c_str());
+
+            TokenMetadata* meta = getTokenMetadata(tokenId);
+            if (meta == nullptr) {
+                Serial.println("✗ Token not found in database");
+            } else {
+                Serial.println("✓ Token found in database");
+                Serial.printf("  Token ID: %s\n", meta->tokenId.c_str());
+                Serial.printf("  Video field: %s\n", meta->video.length() > 0 ? meta->video.c_str() : "(empty)");
+                Serial.printf("  Image field: %s\n", meta->image.length() > 0 ? meta->image.c_str() : "(empty)");
+                Serial.printf("  Audio field: %s\n", meta->audio.length() > 0 ? meta->audio.c_str() : "(empty)");
+                Serial.printf("  Processing image: %s\n", meta->processingImage.length() > 0 ? meta->processingImage.c_str() : "(empty)");
+
+                Serial.println("\n--- Helper Function Tests ---");
+                bool isVideo = hasVideoField(meta);
+                Serial.printf("hasVideoField(): %s\n", isVideo ? "TRUE (video token)" : "FALSE (non-video token)");
+
+                String procImgPath = getProcessingImagePath(meta, tokenId);
+                Serial.printf("getProcessingImagePath(): %s\n", procImgPath.length() > 0 ? procImgPath.c_str() : "(no processing image)");
+
+                if (procImgPath.length() > 0) {
+                    bool fileExists = SD.exists(procImgPath.c_str());
+                    Serial.printf("  File exists on SD: %s\n", fileExists ? "YES" : "NO");
+                }
+            }
+            Serial.println("==================================\n");
+
+        } else if (cmd.startsWith("TEST_PROC_IMG:")) {
+            // Phase 5: Test processing image display
+            String imagePath = cmd.substring(14);
+            imagePath.trim();
+            Serial.println("\n=== Phase 5: Processing Image Display Test ===");
+            Serial.printf("Image path: %s\n", imagePath.c_str());
+
+            // Test the displayProcessingImage function
+            displayProcessingImage(imagePath);
+
+            Serial.println("\n--- Display Complete ---");
+            Serial.println("Verify display shows:");
+            Serial.println("  - BMP image (if file exists) + 'Sending...' overlay");
+            Serial.println("  - OR fallback text-only 'Sending...' display");
+            Serial.println("==================================\n");
+
+        } else if (cmd == "QUEUE_TEST") {
+            // Phase 6: Add mock entries to queue for testing
+            Serial.println("\n=== Phase 6: Queue Test ===");
+            Serial.printf("Adding 20 mock scans to queue...\n");
+            Serial.printf("Queue size before: %d\n", getQueueSize());
+
+            for (int i = 1; i <= 20; i++) {
+                String mockTokenId = "MOCK_" + String(i);
+                String timestamp = generateTimestamp();
+                queueScan(mockTokenId, teamID, deviceID, timestamp);
+                delay(50); // Small delay between queues
+            }
+
+            Serial.printf("Queue size after: %d\n", getQueueSize());
+            Serial.println("✓ 20 mock scans added to queue");
+            Serial.println("===========================\n");
+
+        } else if (cmd == "FORCE_UPLOAD") {
+            // Phase 6: Manually trigger batch upload
+            Serial.println("\n=== Phase 6: Force Batch Upload ===");
+            int queueSize = getQueueSize();
+            Serial.printf("Current queue size: %d\n", queueSize);
+
+            if (queueSize == 0) {
+                Serial.println("✗ Queue is empty, nothing to upload");
+                Serial.println("Try QUEUE_TEST first to add mock entries");
+            } else {
+                ConnectionState state = getConnectionState();
+                if (state != ORCH_CONNECTED) {
+                    Serial.println("⚠️  WARNING: Orchestrator not connected");
+                    Serial.println("Upload will fail, but you can see the attempt");
+                }
+
+                Serial.println("Triggering batch upload...\n");
+                bool success = uploadQueueBatch();
+
+                Serial.printf("\nResult: %s\n", success ? "✓ SUCCESS" : "✗ FAILURE");
+                Serial.printf("Queue size after: %d\n", getQueueSize());
+            }
+            Serial.println("====================================\n");
+
+        } else if (cmd == "SHOW_QUEUE") {
+            // Phase 6: Display queue file contents
+            Serial.println("\n=== Phase 6: Queue Contents ===");
+            int queueSize = getQueueSize();
+            Serial.printf("Queue size: %d entries\n\n", queueSize);
+
+            if (queueSize == 0) {
+                Serial.println("Queue is empty");
+            } else {
+                if (sdTakeMutex("SHOW_QUEUE", 1000)) {
+                    File file = SD.open("/queue.jsonl", FILE_READ);
+                    if (file) {
+                        int lineNum = 0;
+                        Serial.println("Queue entries:");
+                        while (file.available() && lineNum < 20) {
+                            String line = file.readStringUntil('\n');
+                            line.trim();
+                            if (line.length() > 0) {
+                                lineNum++;
+                                Serial.printf("  %d: %s\n", lineNum, line.c_str());
+                            }
+                        }
+                        if (queueSize > 20) {
+                            Serial.printf("  ... and %d more entries\n", queueSize - 20);
+                        }
+                        file.close();
+                    } else {
+                        Serial.println("✗ Could not open queue file");
+                    }
+                    sdGiveMutex("SHOW_QUEUE");
+                } else {
+                    Serial.println("✗ Could not acquire SD mutex");
+                }
+            }
+            Serial.println("================================\n");
+
+        } else if (cmd == "HELP") {
+            Serial.println("\nOrchestrator Debug Commands:");
+            Serial.println("  CONFIG  - Show configuration");
+            Serial.println("  STATUS  - Show connection status and queue");
+            Serial.println("  TOKENS  - Show token database (first 10)");
+            Serial.println("  TEST_VIDEO:tokenId  - Test Phase 5 video helpers");
+            Serial.println("  TEST_PROC_IMG:path  - Test Phase 5 processing image display");
+            Serial.println("\nPhase 6 Queue Commands:");
+            Serial.println("  QUEUE_TEST    - Add 20 mock scans to queue");
+            Serial.println("  FORCE_UPLOAD  - Manually trigger batch upload");
+            Serial.println("  SHOW_QUEUE    - Display queue contents (first 20)");
+            Serial.println("  HELP          - Show this help\n");
+        }
+    }
+    // ══════════════════════════════════════════════════════════════
+
     // Process audio if playing
     if (wav && wav->isRunning()) {
         if (!wav->loop()) {
@@ -1213,12 +2710,28 @@ void loop() {
     if (imageIsDisplayed) {
         if (touchInterruptOccurred) {
             touchInterruptOccurred = false;
+
+            // ═══ WIFI EMI FILTER (validated Oct 19, 2025) ═══
+            // Stabilization delay
+            delayMicroseconds(100);
+
+            // Measure pulse width and apply filter
+            uint32_t pulseWidthUs = measureTouchPulseWidth();
+
+            // Filter: Only process if pulse width >= 10ms (real touch)
+            if (pulseWidthUs < TOUCH_PULSE_WIDTH_THRESHOLD_US) {
+                // WiFi EMI rejected - pulse width too brief
+                return;
+            }
+            // ════════════════════════════════════════════════
+
+            // REAL TOUCH DETECTED - Continue with existing logic
             uint32_t now = millis();
-            
+
             if (now - lastTouchDebounce < TOUCH_DEBOUNCE) {
                 return;
             }
-            
+
             lastTouchDebounce = now;
             
             if (lastTouchWasValid && (now - lastTouchTime) < DOUBLE_TAP_TIMEOUT) {
@@ -1376,18 +2889,137 @@ void loop() {
     
     // Try to read NDEF text
     String ndefText = extractNDEFText();
-    
+
+    // ═══ PHASE 4: ORCHESTRATOR SCAN ROUTING ═══════════════════════
+    // Extract tokenId for orchestrator (NDEF text or UID hex)
+    String tokenId;
+    if (ndefText.length() > 0) {
+        tokenId = ndefText;
+    } else {
+        // Convert UID to hex string for tokenId
+        tokenId = "";
+        for (byte i = 0; i < uid.size; i++) {
+            char hex[3];
+            sprintf(hex, "%02x", uid.uidByte[i]);
+            tokenId += String(hex);
+        }
+    }
+
+    Serial.println("\n[SCAN] ═══ ORCHESTRATOR SCAN START ═══");
+    Serial.printf("[SCAN] Free heap: %d bytes\n", ESP.getFreeHeap());
+    unsigned long scanStartMs = millis();
+
+    Serial.printf("[SCAN] Token ID: %s\n", tokenId.c_str());
+
+    // Create scan request
+    ConnectionState state = getConnectionState();
+    String timestamp = generateTimestamp();
+
+    Serial.printf("[SCAN] Connection state: ");
+    switch (state) {
+        case ORCH_DISCONNECTED:
+            Serial.println("DISCONNECTED");
+            break;
+        case ORCH_WIFI_CONNECTED:
+            Serial.println("WIFI_CONNECTED");
+            break;
+        case ORCH_CONNECTED:
+            Serial.println("CONNECTED");
+            break;
+    }
+    Serial.printf("[SCAN] Timestamp: %s\n", timestamp.c_str());
+
+    // Route scan based on connection state
+    bool scanSent = false;
+    if (state == ORCH_CONNECTED) {
+        Serial.println("[SCAN] Attempting to send to orchestrator...");
+        scanSent = sendScan(tokenId, teamID, deviceID, timestamp);
+
+        if (scanSent) {
+            Serial.println("[SCAN] ✓✓✓ SUCCESS ✓✓✓ Sent to orchestrator");
+        } else {
+            Serial.println("[SCAN] ✗ Send failed, queueing");
+            queueScan(tokenId, teamID, deviceID, timestamp);
+        }
+    } else {
+        Serial.printf("[SCAN] Offline/disconnected, queueing immediately\n");
+        queueScan(tokenId, teamID, deviceID, timestamp);
+    }
+
+    unsigned long scanLatencyMs = millis() - scanStartMs;
+
+    Serial.printf("[SCAN] Queue size: %d entries\n", getQueueSize());
+    Serial.printf("[SCAN] Total scan processing latency: %lu ms\n", scanLatencyMs);
+    Serial.printf("[SCAN] Free heap after scan: %d bytes\n", ESP.getFreeHeap());
+    Serial.println("[SCAN] ═══ ORCHESTRATOR SCAN END ═══\n");
+    // ═══════════════════════════════════════════════════════════════
+
     String filename;
     String audioFilename;
-    
+
+    // ═══ PHASE 4: LOCAL FILE PATH CONSTRUCTION ═══════════════════
+    // ALWAYS construct local SD card paths from tokenId
+    // Files are stored at: /images/{tokenId}.bmp, /audio/{tokenId}.wav
+    if (ndefText.length() > 0) {
+        filename = ndefToFilename(ndefText);           // e.g., "/images/kaa001.bmp"
+        audioFilename = ndefToAudioFilename(ndefText);  // e.g., "/audio/kaa001.wav"
+    } else {
+        filename = uidToFilename(uid);
+        audioFilename = uidToAudioFilename(uid);
+    }
+
+    // ═══ PHASE 5: VIDEO TOKEN DETECTION ═══════════════════════════
+    // Check metadata for video token (scan already sent at line 2595)
+    TokenMetadata* metadata = getTokenMetadata(tokenId);
+    if (metadata != nullptr) {
+        Serial.printf("[TOKEN] Found metadata for tokenId: %s\n", tokenId.c_str());
+        Serial.printf("[TOKEN]   video: %s\n", metadata->video.length() > 0 ? metadata->video.c_str() : "(none)");
+
+        // T098: Video token routing - check if has video field
+        if (hasVideoField(metadata)) {
+            Serial.println("\n[VIDEO] ═══ VIDEO TOKEN PROCESSING START ═══");
+            Serial.printf("[VIDEO] Token ID: %s\n", tokenId.c_str());
+            Serial.printf("[VIDEO] Video URL: %s\n", metadata->video.c_str());
+            Serial.printf("[VIDEO] Free heap: %d bytes\n", ESP.getFreeHeap());
+
+            // T103: Scan already sent to orchestrator (line 2595) - fire-and-forget
+            Serial.println("[VIDEO] ✓ Scan already sent to orchestrator (fire-and-forget)");
+
+            // T099-T102: Display processing image with "Sending..." modal (2.5s)
+            String procImgPath = getProcessingImagePath(metadata, tokenId);
+            Serial.printf("[VIDEO] Processing image path: %s\n",
+                         procImgPath.length() > 0 ? procImgPath.c_str() : "(no processing image)");
+
+            displayProcessingImage(procImgPath);  // Includes 2.5s auto-hide timer
+
+            // T105: Return to ready mode after processing image timeout
+            Serial.println("[VIDEO] Modal timeout complete, returning to ready mode");
+
+            // Clear display and show ready screen
+            tft.fillScreen(TFT_BLACK);
+            tft.setCursor(0, 0);
+            tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+            tft.setTextSize(2);
+            tft.println("NeurAI");
+            tft.println("Memory Scanner");
+            tft.println("READY TO SCAN");
+
+            Serial.printf("[VIDEO] Free heap after video processing: %d bytes\n", ESP.getFreeHeap());
+            Serial.println("[VIDEO] ═══ VIDEO TOKEN PROCESSING END ═══\n");
+
+            // T106: Early return - skip local content display (BMP/audio)
+            Serial.println("[VIDEO] ✓ Skipping local content display for video token");
+            return;  // Exit loop() immediately
+        }
+    } else {
+        Serial.printf("[TOKEN] No metadata found for tokenId: %s (will use local files if present)\n", tokenId.c_str());
+    }
+    // ═══════════════════════════════════════════════════════════════
+
     if (ndefText.length() > 0) {
         Serial.printf("[RFID] Using NDEF text: '%s'\n", ndefText.c_str());
-        Serial.printf("[RFID] Using NDEF text: '%s'\n", ndefText.c_str());
-        Serial.printf("[RFID] Cleaned for filename: '%s'\n", ndefText.c_str());
-        filename = ndefToFilename(ndefText);
-        audioFilename = ndefToAudioFilename(ndefText);
         lastNDEFText = ndefText;
-        
+
         // Display the extracted text on screen
         tft.fillScreen(TFT_BLACK);
         tft.setCursor(0, 0);
@@ -1399,8 +3031,6 @@ void loop() {
         delay(1000);
     } else {
         Serial.println("[RFID] No NDEF text, using UID");
-        filename = uidToFilename(uid);
-        audioFilename = uidToAudioFilename(uid);
     }
     
     Serial.printf("[RFID] BMP: %s\n", filename.c_str());

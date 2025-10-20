@@ -1,0 +1,590 @@
+/*
+ * Test 45v2: WiFi EMI Touch IRQ Filtering - Pulse Width Measurement
+ *
+ * PURPOSE: Measure IRQ pulse widths to distinguish WiFi EMI from real touches (DIAGNOSTIC PHASE)
+ *
+ * ROOT CAUSE (Test-44): WiFi 2.4GHz radio induces EMI on GPIO36 (input-only, cannot add pull-down)
+ *   - WiFi OFF: 0.00 spurious IRQs/sec ✓
+ *   - WiFi ON:  3.50 spurious IRQs/sec (350x increase!)
+ *
+ * APPROACH: Measure how long GPIO36 stays LOW after falling edge
+ *   - WiFi EMI hypothesis: Brief glitch, LOW for microseconds
+ *   - Real touch hypothesis: GPIO36 stays LOW while finger pressed (milliseconds)
+ *
+ * DIAGNOSTIC METHODOLOGY:
+ *   Phase 1 (BASELINE - 60s): Measure WiFi EMI pulse widths
+ *     - WiFi ON, no touching
+ *     - Log every IRQ pulse width
+ *     - Determine WiFi EMI pulse duration range
+ *
+ *   Phase 2 (TAPTEST - interactive): Measure real touch pulse widths
+ *     - User taps 5 times
+ *     - Log every IRQ pulse width
+ *     - Determine real touch pulse duration range
+ *
+ *   Phase 3 (ANALYSIS): Set filtering threshold based on data
+ *
+ * CONSTRAINTS:
+ *   - Direct GPIO IRQ only (no XPT2046 library - avoids SPI conflicts with bitbanged RFID)
+ *   - Production v3.4 uses direct IRQ + 50ms debounce (NOT sufficient for WiFi EMI)
+ *
+ * Date: 2025-10-19
+ * Author: Claude Code (ESP32 Arduino Skill)
+ */
+
+#include <WiFi.h>
+#include <TFT_eSPI.h>
+#include <FS.h>
+#include <SD.h>
+#include <SPI.h>
+// NOTE: NOT using XPT2046 library - direct GPIO IRQ only to avoid SPI conflicts with RFID
+
+// ============================================================================
+// HARDWARE CONFIGURATION
+// ============================================================================
+
+// Touch pins (XPT2046)
+#define TOUCH_CS 33
+#define TOUCH_IRQ 36  // Input-only, no pull-down, picks up WiFi EMI
+
+// SD Card pins (VSPI)
+#define SD_CS 5
+#define SD_MOSI 23
+#define SD_MISO 19
+#define SD_SCK 18
+
+// TFT display
+TFT_eSPI tft = TFT_eSPI();
+// NO XPT2046 library - using direct GPIO IRQ only
+
+// ============================================================================
+// PULSE WIDTH MEASUREMENT CONFIGURATION
+// ============================================================================
+
+// Diagnostic: measure pulse widths to set threshold
+const uint32_t MAX_PULSE_MEASUREMENT_US = 100000;  // 100ms max measurement
+
+// ============================================================================
+// GLOBAL STATE (ISR-safe)
+// ============================================================================
+
+// IRQ event flag
+volatile bool irqOccurred = false;
+volatile uint32_t irqTriggerTime = 0;  // micros() when IRQ occurred
+
+// Statistics
+uint32_t totalIRQs = 0;
+uint32_t pulsesUnder1ms = 0;   // Likely WiFi EMI
+uint32_t pulses1to10ms = 0;    // Gray area
+uint32_t pulsesOver10ms = 0;   // Likely real touches
+
+// For tap test
+uint8_t validTouchesDetected = 0;
+
+// Test phase state
+enum TestPhase {
+  PHASE_IDLE,
+  PHASE_BASELINE,   // Autonomous: 60s EMI measurement (expect zero valid touches)
+  PHASE_TAPTEST     // Interactive: Prompt user for 5 taps
+};
+
+TestPhase currentPhase = PHASE_IDLE;
+uint32_t phaseStartTime = 0;
+const uint32_t BASELINE_DURATION_MS = 60000;  // 60 seconds
+const uint32_t TAPTEST_DURATION_MS = 60000;   // 60 seconds timeout
+const uint8_t TAPTEST_TARGET_TOUCHES = 5;     // Expect 5 taps
+
+// WiFi configuration
+String wifiSSID = "";
+String wifiPassword = "";
+bool wifiConnected = false;
+
+// ============================================================================
+// TOUCH IRQ HANDLER (Minimal - just flag the event)
+// ============================================================================
+
+void IRAM_ATTR touchISR() {
+  // Minimal ISR - just flag that an IRQ occurred
+  // Pulse width measurement happens in loop()
+  irqOccurred = true;
+  irqTriggerTime = micros();
+}
+
+// ============================================================================
+// CONFIGURATION PARSING
+// ============================================================================
+
+bool loadWiFiConfig() {
+  if (!SD.begin(SD_CS)) {
+    Serial.println("[CONFIG] ✗ SD card mount failed");
+    return false;
+  }
+
+  File file = SD.open("/config.txt", FILE_READ);
+  if (!file) {
+    Serial.println("[CONFIG] ✗ Could not open /config.txt");
+    Serial.println("[CONFIG]   Using default WiFi: Create config.txt with WIFI_SSID and WIFI_PASSWORD");
+    return false;
+  }
+
+  Serial.println("[CONFIG] Reading /config.txt...");
+
+  while (file.available()) {
+    String line = file.readStringUntil('\n');
+    line.trim();
+
+    if (line.length() == 0) continue;
+
+    int separatorIndex = line.indexOf('=');
+    if (separatorIndex == -1) continue;
+
+    String key = line.substring(0, separatorIndex);
+    String value = line.substring(separatorIndex + 1);
+
+    key.trim();
+    value.trim();
+
+    if (key == "WIFI_SSID") {
+      wifiSSID = value;
+      Serial.printf("[CONFIG] WIFI_SSID: %s\n", wifiSSID.c_str());
+    } else if (key == "WIFI_PASSWORD") {
+      wifiPassword = value;
+      Serial.printf("[CONFIG] WIFI_PASSWORD: %s\n", wifiPassword.c_str());
+    }
+  }
+
+  file.close();
+
+  if (wifiSSID.length() == 0) {
+    Serial.println("[CONFIG] ✗ WIFI_SSID not found in config.txt");
+    return false;
+  }
+
+  Serial.println("[CONFIG] ✓ Configuration loaded successfully");
+  return true;
+}
+
+// ============================================================================
+// WIFI CONNECTION
+// ============================================================================
+
+bool connectWiFi() {
+  if (wifiSSID.length() == 0) {
+    Serial.println("[WIFI] ✗ No SSID configured");
+    return false;
+  }
+
+  Serial.printf("[WIFI] Connecting to: %s\n", wifiSSID.c_str());
+  WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+
+  uint32_t startTime = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startTime < 30000) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("[WIFI] ✓ Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("[WIFI]   Signal: %d dBm\n", WiFi.RSSI());
+    wifiConnected = true;
+    return true;
+  } else {
+    Serial.println("[WIFI] ✗ Connection timeout");
+    return false;
+  }
+}
+
+// ============================================================================
+// STATISTICS & REPORTING
+// ============================================================================
+
+void printStatistics() {
+  uint32_t uptimeSeconds = millis() / 1000;
+
+  Serial.println("\n╔════════════════════════════════════════════════════════╗");
+  Serial.println("║            EMI FILTER STATISTICS                      ║");
+  Serial.println("╠════════════════════════════════════════════════════════╣");
+
+  // IRQ statistics
+  float rawIRQRate = (uptimeSeconds > 0) ? ((float)rawIRQCount / uptimeSeconds) : 0.0;
+  float filteredRate = (uptimeSeconds > 0) ? ((float)filteredIRQCount / uptimeSeconds) : 0.0;
+  float validRate = (uptimeSeconds > 0) ? ((float)validTouchCount / uptimeSeconds) : 0.0;
+
+  Serial.printf("║ Uptime:           %lu seconds\n", uptimeSeconds);
+  Serial.println("╟────────────────────────────────────────────────────────╢");
+  Serial.printf("║ Raw IRQs:         %lu  (%.2f/sec)\n", rawIRQCount, rawIRQRate);
+  Serial.printf("║ Filtered (EMI):   %lu  (%.2f/sec)\n", filteredIRQCount, filteredRate);
+  Serial.printf("║ Valid Touches:    %lu  (%.2f/sec)\n", validTouchCount, validRate);
+  Serial.println("╟────────────────────────────────────────────────────────╢");
+
+  // Filter effectiveness
+  uint32_t totalProcessed = filteredIRQCount + validTouchCount * MIN_CONSECUTIVE_IRQS;
+  float filterEffectiveness = (totalProcessed > 0)
+    ? (100.0 * filteredIRQCount / totalProcessed)
+    : 0.0;
+
+  Serial.printf("║ Filter Effectiveness: %.1f%% EMI rejected\n", filterEffectiveness);
+  Serial.println("╟────────────────────────────────────────────────────────╢");
+
+  // WiFi status
+  Serial.printf("║ WiFi:             %s\n", wifiConnected ? "✓ CONNECTED (EMI source active)" : "✗ DISCONNECTED");
+  if (wifiConnected) {
+    Serial.printf("║ Signal:           %d dBm\n", WiFi.RSSI());
+  }
+
+  Serial.println("╟────────────────────────────────────────────────────────╢");
+  Serial.printf("║ Validation:       %d IRQs within %lums = valid touch\n",
+                MIN_CONSECUTIVE_IRQS, IRQ_VALIDATION_WINDOW_MS);
+  Serial.printf("║ Current Phase:    %s\n",
+                currentPhase == PHASE_IDLE ? "IDLE" :
+                currentPhase == PHASE_BASELINE ? "BASELINE TEST" : "TAP TEST");
+
+  Serial.println("╚════════════════════════════════════════════════════════╝\n");
+
+  Serial.printf("[HEAP] Free: %d bytes\n\n", ESP.getFreeHeap());
+}
+
+void resetStatistics() {
+  rawIRQCount = 0;
+  validTouchCount = 0;
+  filteredIRQCount = 0;
+  consecutiveIRQs = 0;
+  lastIRQTime = 0;
+  touchDetected = false;
+
+  Serial.println("[RESET] ✓ All statistics counters reset to zero");
+}
+
+// ============================================================================
+// TEST PHASES
+// ============================================================================
+
+void startBaselineTest() {
+  Serial.println("\n╔════════════════════════════════════════════════════════╗");
+  Serial.println("║        PHASE 1: BASELINE TEST (60 SECONDS)            ║");
+  Serial.println("╠════════════════════════════════════════════════════════╣");
+  Serial.println("║ PURPOSE: Measure WiFi EMI spurious IRQ rate           ║");
+  Serial.println("║ EXPECTATION: Zero valid touches detected              ║");
+  Serial.println("║              (All WiFi EMI filtered out)               ║");
+  Serial.println("║                                                        ║");
+  Serial.println("║ >>> DO NOT TOUCH THE SCREEN <<<                       ║");
+  Serial.println("║                                                        ║");
+  Serial.println("║ Countdown will display on screen...                   ║");
+  Serial.println("╚════════════════════════════════════════════════════════╝\n");
+
+  resetStatistics();
+  currentPhase = PHASE_BASELINE;
+  phaseStartTime = millis();
+
+  // TFT display
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(10, 10);
+  tft.println("BASELINE TEST");
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setCursor(10, 40);
+  tft.println("Measuring WiFi EMI...");
+  tft.setCursor(10, 60);
+  tft.println("DO NOT TOUCH SCREEN");
+}
+
+void startTapTest() {
+  Serial.println("\n╔════════════════════════════════════════════════════════╗");
+  Serial.println("║      PHASE 2: TAP TEST (INTERACTIVE)                  ║");
+  Serial.println("╠════════════════════════════════════════════════════════╣");
+  Serial.println("║ PURPOSE: Validate real touch detection with EMI       ║");
+  Serial.println("║          filtering active                              ║");
+  Serial.println("║                                                        ║");
+  Serial.println("║ >>> PLEASE TAP THE SCREEN 5 TIMES NOW <<<             ║");
+  Serial.println("║                                                        ║");
+  Serial.println("║ Each valid touch will be logged below:                ║");
+  Serial.println("╚════════════════════════════════════════════════════════╝\n");
+
+  resetStatistics();
+  currentPhase = PHASE_TAPTEST;
+  phaseStartTime = millis();
+
+  // TFT display
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.setTextSize(3);
+  tft.setCursor(10, 80);
+  tft.println("TAP SCREEN");
+  tft.setCursor(10, 120);
+  tft.println("5 TIMES");
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(10, 180);
+  tft.println("Touches: 0/5");
+}
+
+void updateBaselineTest() {
+  uint32_t elapsed = millis() - phaseStartTime;
+  uint32_t remaining = (BASELINE_DURATION_MS - elapsed) / 1000;
+
+  // Update TFT countdown
+  tft.fillRect(10, 90, 220, 40, TFT_BLACK);  // Clear countdown area
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.setTextSize(3);
+  tft.setCursor(10, 90);
+  tft.printf("%lu sec", remaining);
+
+  // Update statistics on TFT
+  tft.fillRect(10, 140, 220, 80, TFT_BLACK);  // Clear stats area
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setCursor(10, 140);
+  tft.printf("Raw IRQs: %lu", rawIRQCount);
+  tft.setCursor(10, 160);
+  tft.printf("Filtered: %lu", filteredIRQCount);
+  tft.setCursor(10, 180);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.printf("Valid: %lu", validTouchCount);
+
+  // Print periodic statistics to serial
+  static uint32_t lastSerialUpdate = 0;
+  if (millis() - lastSerialUpdate > 10000) {  // Every 10 seconds
+    Serial.printf("[%lu sec] Raw IRQs: %lu | Filtered: %lu | Valid: %lu\n",
+                  (millis() - phaseStartTime) / 1000,
+                  rawIRQCount, filteredIRQCount, validTouchCount);
+    lastSerialUpdate = millis();
+  }
+
+  // Check for completion
+  if (elapsed >= BASELINE_DURATION_MS) {
+    Serial.println("\n╔════════════════════════════════════════════════════════╗");
+    Serial.println("║        BASELINE TEST COMPLETE                         ║");
+    Serial.println("╚════════════════════════════════════════════════════════╝");
+    printStatistics();
+
+    // Validate results
+    if (validTouchCount == 0) {
+      Serial.println("[RESULT] ✓✓✓ PASS: Zero valid touches (EMI filtered successfully)");
+    } else {
+      Serial.printf("[RESULT] ✗✗✗ FAIL: %lu valid touches detected (expected zero)\n", validTouchCount);
+      Serial.println("[RESULT]         EMI filter may need tuning");
+    }
+
+    currentPhase = PHASE_IDLE;
+
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setTextSize(2);
+    tft.setCursor(10, 100);
+    tft.println("Test complete");
+    tft.setTextSize(1);
+    tft.setCursor(10, 130);
+    tft.println("Check serial monitor");
+  }
+}
+
+void updateTapTest() {
+  uint32_t elapsed = millis() - phaseStartTime;
+  uint32_t remaining = (TAPTEST_DURATION_MS - elapsed) / 1000;
+
+  // Check for valid touch
+  if (touchDetected) {
+    touchDetected = false;  // Clear flag
+
+    Serial.printf("[%lu ms] ✓ Valid touch #%lu detected\n",
+                  millis() - phaseStartTime, validTouchCount);
+
+    // Update TFT
+    tft.fillRect(10, 180, 220, 30, TFT_BLACK);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setTextSize(2);
+    tft.setCursor(10, 180);
+    tft.printf("Touches: %lu/5", validTouchCount);
+
+    // Flash visual feedback
+    tft.fillCircle(120, 40, 20, TFT_GREEN);
+    delay(100);
+    tft.fillCircle(120, 40, 20, TFT_BLACK);
+  }
+
+  // Update timeout countdown
+  tft.fillRect(10, 220, 220, 20, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.setCursor(10, 220);
+  tft.printf("Timeout: %lu sec", remaining);
+
+  // Check for completion
+  bool complete = false;
+  String result = "";
+
+  if (validTouchCount >= TAPTEST_TARGET_TOUCHES) {
+    complete = true;
+    result = "SUCCESS: 5/5 touches detected";
+    Serial.println("\n[RESULT] ✓✓✓ " + result);
+  } else if (elapsed >= TAPTEST_DURATION_MS) {
+    complete = true;
+    result = String("TIMEOUT: ") + String(validTouchCount) + "/5 touches detected";
+    Serial.println("\n[RESULT] ✗✗✗ " + result);
+  }
+
+  if (complete) {
+    Serial.println("\n╔════════════════════════════════════════════════════════╗");
+    Serial.println("║          TAP TEST COMPLETE                            ║");
+    Serial.println("╚════════════════════════════════════════════════════════╝");
+    printStatistics();
+
+    currentPhase = PHASE_IDLE;
+
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setTextSize(2);
+    tft.setCursor(10, 80);
+    tft.println("Test complete");
+    tft.setTextSize(1);
+    tft.setCursor(10, 120);
+    tft.println(result);
+    tft.setCursor(10, 140);
+    tft.println("Check serial monitor");
+  }
+}
+
+// ============================================================================
+// SERIAL COMMAND PROCESSING
+// ============================================================================
+
+void processSerialCommand(String cmd) {
+  cmd.trim();
+  cmd.toUpperCase();
+
+  if (cmd == "STATUS") {
+    printStatistics();
+
+  } else if (cmd == "BASELINE") {
+    if (currentPhase != PHASE_IDLE) {
+      Serial.println("[CMD] ✗ Test already running, please wait");
+    } else {
+      startBaselineTest();
+    }
+
+  } else if (cmd == "TAPTEST") {
+    if (currentPhase != PHASE_IDLE) {
+      Serial.println("[CMD] ✗ Test already running, please wait");
+    } else {
+      startTapTest();
+    }
+
+  } else if (cmd == "RESET") {
+    resetStatistics();
+
+  } else if (cmd == "HELP") {
+    Serial.println("\n╔════════════════════════════════════════════════════════╗");
+    Serial.println("║          AVAILABLE SERIAL COMMANDS                    ║");
+    Serial.println("╠════════════════════════════════════════════════════════╣");
+    Serial.println("║ STATUS   - Show current IRQ statistics                ║");
+    Serial.println("║ BASELINE - Run 60-second autonomous EMI test          ║");
+    Serial.println("║ TAPTEST  - Run interactive tap test (5 touches)       ║");
+    Serial.println("║ RESET    - Reset all statistics counters              ║");
+    Serial.println("║ HELP     - Show this command list                     ║");
+    Serial.println("╚════════════════════════════════════════════════════════╝\n");
+
+  } else if (cmd.length() > 0) {
+    Serial.println("[CMD] ✗ Unknown command: " + cmd);
+    Serial.println("[CMD]   Type HELP for available commands");
+  }
+}
+
+// ============================================================================
+// SETUP
+// ============================================================================
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  Serial.println("\n\n");
+  Serial.println("╔════════════════════════════════════════════════════════╗");
+  Serial.println("║     Test 45: WiFi EMI Touch IRQ Filtering             ║");
+  Serial.println("╠════════════════════════════════════════════════════════╣");
+  Serial.println("║ PURPOSE: Validate consecutive IRQ filtering to        ║");
+  Serial.println("║          eliminate WiFi EMI spurious interrupts       ║");
+  Serial.println("║                                                        ║");
+  Serial.println("║ ALGORITHM:                                             ║");
+  Serial.println("║   - Require 3 IRQs within 20ms to validate touch      ║");
+  Serial.println("║   - WiFi EMI: Isolated single IRQs (~286ms apart)     ║");
+  Serial.println("║   - Real touch: Burst of IRQs (millisecond clusters)  ║");
+  Serial.println("╚════════════════════════════════════════════════════════╝\n");
+
+  // Initialize TFT
+  Serial.println("[INIT] Initializing TFT display...");
+  tft.init();
+  tft.setRotation(1);  // Landscape
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(10, 100);
+  tft.println("Initializing...");
+
+  // Load WiFi configuration
+  Serial.println("[INIT] Loading WiFi configuration...");
+  loadWiFiConfig();
+
+  // Connect WiFi
+  Serial.println("[INIT] Connecting to WiFi (EMI source)...");
+  connectWiFi();
+
+  if (!wifiConnected) {
+    Serial.println("[WARN] WiFi not connected - EMI test may not be valid");
+    Serial.println("[WARN] WiFi EMI is the root cause being tested!");
+  }
+
+  // Initialize touch
+  Serial.println("[INIT] Initializing touch controller...");
+  touch.begin();
+
+  // Attach IRQ handler
+  Serial.println("[INIT] Attaching touch IRQ handler...");
+  pinMode(TOUCH_IRQ, INPUT);
+  attachInterrupt(digitalPinToInterrupt(TOUCH_IRQ), touchISR, FALLING);
+
+  Serial.println("[INIT] ✓ Initialization complete\n");
+
+  Serial.println("╔════════════════════════════════════════════════════════╗");
+  Serial.println("║          READY FOR TESTING                            ║");
+  Serial.println("╠════════════════════════════════════════════════════════╣");
+  Serial.println("║ Type HELP for available commands                      ║");
+  Serial.println("║ Type BASELINE to start autonomous EMI test            ║");
+  Serial.println("║ Type TAPTEST to start interactive tap test            ║");
+  Serial.println("╚════════════════════════════════════════════════════════╝\n");
+
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(10, 80);
+  tft.println("READY");
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setCursor(10, 120);
+  tft.println("Type HELP in serial");
+  tft.setCursor(10, 140);
+  tft.println("for commands");
+}
+
+// ============================================================================
+// MAIN LOOP
+// ============================================================================
+
+void loop() {
+  // Process serial commands
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    processSerialCommand(cmd);
+  }
+
+  // Update current test phase
+  if (currentPhase == PHASE_BASELINE) {
+    updateBaselineTest();
+  } else if (currentPhase == PHASE_TAPTEST) {
+    updateTapTest();
+  }
+
+  delay(100);  // Main loop 10Hz
+}

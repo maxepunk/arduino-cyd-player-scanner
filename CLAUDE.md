@@ -1,9 +1,10 @@
 # CLAUDE.md - CYD RFID Scanner Arduino Project
 
-## 🎯 PROJECT STATUS: PRODUCTION-READY
-**Last Updated:** October 18, 2025
+## 🎯 PROJECT STATUS: DEVELOPMENT IN PROGRESS
+**Last Updated:** October 19, 2025
 **Platform:** Raspberry Pi (Native Linux Arduino CLI)
-**Status:** All critical issues resolved, working sketch ready for deployment
+**Current Work:** Orchestrator integration (specs/003-orchestrator-hardware-integration)
+**Production Sketch:** v3.4 stable, v4.0 in development
 
 ---
 
@@ -34,7 +35,7 @@ ALNScanner0812Working/
 - `specs/001-we-are-trying/` - ST7789 fix implementation docs
 - `specs/002-audio-debug-project/` - RFID beeping fix docs
 
-### 🧪 **TEST SKETCHES (DIAGNOSTIC TOOLS)**
+### 🧪 **TEST SKETCHES (DEVELOPMENT & DIAGNOSTIC TOOLS)**
 ```
 test-sketches/
 ├── 01-display-hello/       # Display test
@@ -42,8 +43,15 @@ test-sketches/
 ├── 03-touch-irq/           # Touch detection
 ├── 07-rfid-init/           # RFID initialization
 ├── 13-audio-isolation-test/ # Audio debugging
-└── ... [34 total diagnostic sketches]
+├── 38-wifi-connect/        # ✅ WiFi connection & config parser (Oct 19, 2025)
+├── 39-http-client/         # HTTP client for orchestrator API
+├── 40-json-parse/          # ArduinoJson token database parsing
+├── 41-queue-file/          # Offline queue (JSONL) operations
+├── 42-background-sync/     # FreeRTOS background task & queue sync
+└── ... [42+ diagnostic sketches]
 ```
+
+**Note:** Test sketches 38-42 are full development units with production-ready code for orchestrator integration (see DEVELOPMENT METHODOLOGY).
 
 ### 🗄️ **ARCHIVE (DEPRECATED - DO NOT USE)**
 ```
@@ -134,6 +142,99 @@ arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=115200
 - **Partition Scheme:** `default`
 - **Upload Speed:** `921600`
 - **Baud Rate:** `115200` (serial monitor)
+
+### **Test Sketch Compilation (with project-local libraries)**
+
+```bash
+# Compile test sketch with explicit library paths
+arduino-cli compile --fqbn esp32:esp32:esp32 \
+  --library ~/projects/Arduino/libraries/TFT_eSPI \
+  --library ~/projects/Arduino/libraries/MFRC522 \
+  --library ~/projects/Arduino/libraries/ESP8266Audio \
+  --library ~/projects/Arduino/libraries/XPT2046_Touchscreen \
+  test-sketches/38-wifi-connect
+
+# Upload and test
+arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32 test-sketches/38-wifi-connect
+```
+
+---
+
+## 🛠️ DEVELOPMENT METHODOLOGY
+
+### **Test-First Hardware Development (CRITICAL)**
+
+**Principle:** Test sketches are NOT validation artifacts - they ARE the implementation.
+
+When adding new hardware features:
+
+1. **Create instrumented test sketch FIRST** in `test-sketches/`
+   - Full serial debugging with timestamps `[millis()] Event description`
+   - Statistics tracking (attempts, success rate, failures)
+   - Interactive serial commands (STATUS, TEST, HELP)
+   - Memory usage monitoring (`ESP.getFreeHeap()`)
+
+2. **Validate on physical hardware IMMEDIATELY**
+   - Upload to CYD device
+   - Test via serial monitor commands
+   - Verify edge cases (disconnect, timeout, error handling)
+   - **DO NOT proceed until test passes on hardware**
+
+3. **Extract production code from validated test**
+   - Test sketch contains production-ready, proven code
+   - Direct integration into `ALNScanner0812Working.ino`
+   - Retain test sketch for future regression testing
+
+### **Serial Instrumentation Pattern**
+
+```cpp
+// Statistics tracking
+int attempts = 0;
+int successes = 0;
+unsigned long startTime = 0;
+
+// Event logging with timestamp
+Serial.printf("[%lu] EVENT: Connection attempt #%d\n", millis(), attempts);
+Serial.printf("        Details: %s\n", details);
+
+// Success metrics
+Serial.printf("        Success rate: %d/%d (%.1f%%)\n",
+              successes, attempts,
+              100.0 * successes / attempts);
+
+// Interactive commands in loop()
+if (Serial.available()) {
+  String cmd = Serial.readStringUntil('\n');
+  cmd.trim();
+  if (cmd == "STATUS") printStatus();
+  else if (cmd == "HELP") printHelp();
+}
+```
+
+### **Why This Matters**
+
+- **ESP32 hardware differs from simulation**: WiFi timing, SPI behavior, memory constraints
+- **Integration bugs are expensive**: Finding issues in 3000-line production sketch vs 200-line test
+- **Test sketches become living documentation**: Future developers see exact working implementation
+- **Instrumentation aids debugging**: Real-time diagnostics beat guessing every time
+
+### **Example: WiFi Connection Test (Oct 19, 2025)**
+
+**Test sketch:** `test-sketches/38-wifi-connect/`
+
+**Results on hardware:**
+- Connection time: 1196 ms
+- Signal strength: -70 dBm
+- Success rate: 100% (2/2 attempts)
+- Auto-reconnect: WORKING
+- Free heap: 204 KB
+
+**Interactive commands added:**
+- `STATUS` - Full connection info, statistics, memory
+- `RECONNECT` - Force disconnection and reconnect test
+- `MEM` - Heap usage
+
+**Code is now production-ready** - directly portable to main sketch.
 
 ---
 
