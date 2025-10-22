@@ -1,6 +1,6 @@
 ---
 name: esp32-arduino
-description: Comprehensive ESP32 embedded development using Arduino CLI on Linux/Debian. Use this skill when developing embedded systems projects with ESP32 microcontrollers, compiling sketches, uploading firmware, debugging hardware issues, or working with GPIO, SPI, I2C, UART, displays, sensors, or other peripherals on ESP32 boards.
+description: Comprehensive ESP32 embedded development using Arduino CLI on Linux/Debian. Use this skill when developing embedded systems projects with ESP32 microcontrollers, compiling sketches, uploading firmware, organizing code into modular structures, refactoring large projects, debugging hardware issues, or working with GPIO, SPI, I2C, UART, displays, sensors, or other peripherals on ESP32 boards. Includes complete multi-file project organization guidance.
 ---
 
 # ESP32 Arduino CLI Development Skill
@@ -12,11 +12,14 @@ This skill provides complete workflows for ESP32 embedded development using Ardu
 Use this skill for:
 - Setting up ESP32 development environment
 - Compiling and uploading ESP32 sketches
+- **Organizing and refactoring ESP32 projects for better maintainability**
+- **Splitting large single-file sketches into modular structure**
 - Configuring GPIO, SPI, I2C, UART, and other interfaces
 - Debugging hardware issues (boot failures, crashes, memory problems)
 - Working with specific ESP32 boards (CYD, DevKit, WROVER, etc.)
 - Integrating peripherals (displays, sensors, RFID readers, etc.)
 - Troubleshooting compilation, upload, and runtime errors
+- **Creating reusable modules for ESP32 applications**
 
 ## Serial Communication - Critical for Development
 
@@ -118,38 +121,98 @@ See scripts output for detailed instructions on manual boot mode entry.
 
 ## Project Structure Best Practices
 
-### Recommended Organization
+Organize code based on project complexity. See `references/code_organization.md` for comprehensive multi-file organization guide.
 
+### Quick Decision Guide
+
+**Single file (< 200 lines):** Simple projects, prototypes
 ```
-MyESP32Project/
-├── MyESP32Project.ino     # Main sketch
-├── config.h                # Configuration (use template)
-├── module1.h/.cpp          # Modular code
-├── module2.h/.cpp
-└── README.md
+MyProject/
+└── MyProject.ino
+```
+
+**Config split (200-500 lines):** First refactoring step
+```
+MyProject/
+├── MyProject.ino
+└── config.h
+```
+
+**Modular (500-2000 lines):** Production projects, multiple subsystems
+```
+MyProject/
+├── MyProject.ino          # Main coordination (50-100 lines)
+├── config.h               # Configuration
+├── display_mgr.h/.cpp     # Display handling
+├── wifi_mgr.h/.cpp        # Network operations
+└── sensor.h/.cpp          # Sensor reading
+```
+
+**Advanced (> 2000 lines):** Complex applications, teams
+```
+MyProject/
+├── MyProject.ino
+└── src/
+    ├── config/
+    ├── hal/               # Hardware abstraction
+    ├── drivers/           # Device drivers
+    └── managers/          # High-level controllers
 ```
 
 ### Starting a New Project
 
-Use the provided templates:
+Use the provided templates based on complexity:
 
 ```bash
-# Create sketch structure
-mkdir MyProject && cd MyProject
+# Simple single file
+cp assets/sketch_template.ino MyProject/MyProject.ino
 
-# Copy template files
-cp assets/sketch_template.ino MyProject.ino
-cp assets/config_template.h config.h
+# With configuration
+cp assets/sketch_template.ino MyProject/MyProject.ino
+cp assets/config_template.h MyProject/config.h
 
-# Edit as needed, then compile
-./scripts/compile_esp32.sh MyProject.ino
+# Modular project (recommended for > 200 lines)
+cp -r assets/modular_template/ MyProject/
+cd MyProject/
+mv modular_template.ino MyProject.ino
+# Edit and add your own modules
 ```
+
+### Working Examples
+
+See `references/examples/` for complete working projects:
+- **simple_modular/** - 3-module example (~365 lines) demonstrating LED, button, sensor
+- **cyd_display_project/** - CYD-specific organization with display, touch, WiFi
+
+These examples show proper file organization, module patterns, and non-blocking code.
 
 ## Essential Reference Documentation
 
 Read the appropriate reference file(s) based on your needs:
 
-### Serial Communication (NEW - Critical for Development)
+### Code Organization (NEW - Essential for Projects > 200 Lines)
+**File:** `references/code_organization.md`
+**Read when:** Project outgrowing single file, refactoring needed, or want to split into modules
+
+**Covers:**
+- When to refactor (decision criteria by project size)
+- Arduino CLI compilation model for multi-file projects
+- Proper header/implementation file structure
+- Step-by-step refactoring workflow (6 phases)
+- Common module patterns (managers, callbacks, state machines, HAL)
+- Avoiding pitfalls (circular dependencies, include issues)
+- CYD-specific organization challenges
+- Compilation troubleshooting after refactoring
+
+**Critical for:**
+- Projects > 200 lines that need better organization
+- Converting single-file sketches to modular structure
+- Creating reusable modules
+- Team collaboration on ESP32 projects
+
+**Working examples:** See `references/examples/simple_modular/` and study the patterns
+
+### Serial Communication (Critical for Development)
 **File:** `references/serial_communication.md`
 **Read when:** Any serial communication task, debugging command processing, or communication failures
 
@@ -341,6 +404,179 @@ Read the appropriate reference file(s) based on your needs:
 - Commands not being read (Serial.available() not checked)
 - Wrong line endings (need \n character)
 
+## Refactoring Large Projects
+
+When projects outgrow single files, proper refactoring maintains code quality and enables growth.
+
+### When to Refactor
+
+**Refactor when you experience:**
+- Difficulty finding specific code sections (excessive scrolling)
+- Fear of breaking unrelated code when making changes
+- Multiple people need to work on the same file
+- Want to reuse components in other projects
+- Need to test components independently
+- File exceeds 200-300 lines
+
+**Typical triggers:**
+- Single file > 200 lines → Extract config.h
+- Single file > 500 lines → Split into modules
+- Multiple related projects → Create reusable modules
+- Team collaboration → Modular organization required
+
+### Quick Refactoring Overview
+
+**Read first:** `references/code_organization.md` provides complete step-by-step workflow
+
+**Summary of process:**
+1. **Extract configuration** (30 min) - Move constants to config.h
+2. **Identify modules** (1 hour) - Map functional boundaries
+3. **Create headers** (2 hours) - Define public interfaces
+4. **Implement modules** (3-5 hours) - Move code to .cpp files
+5. **Update main** (1 hour) - Simplify to coordination only
+6. **Test thoroughly** (2 hours) - Verify each module works
+
+**Total time:** 8-11 hours for typical 800-line project
+
+### Example: CYD Project Refactoring
+
+**Before:** Single 800-line file
+- Mixed display, touch, WiFi, SD card code
+- Hard to modify one subsystem without risk to others
+- Difficult to test display independently
+- Tight coupling everywhere
+
+**After:** Modular organization
+```
+CYDProject/
+├── CYDProject.ino        # 50 lines: setup/loop coordination
+├── config.h              # Pin definitions, constants
+├── cyd_pins.h            # CYD-specific pin mapping
+├── display_mgr.h/cpp     # All TFT operations
+├── touch_mgr.h/cpp       # Touch handling
+├── wifi_mgr.h/cpp        # Network operations
+└── sd_mgr.h/cpp          # SD card operations
+```
+
+**Benefits:**
+- Display changes don't affect WiFi code
+- Can test each module independently
+- Multiple developers can work simultaneously
+- Modules reusable in other CYD projects
+- Main file shows high-level logic clearly
+
+### Key Refactoring Patterns
+
+**Pattern 1: Manager Classes**
+```cpp
+// display_manager.h
+class DisplayManager {
+public:
+    bool begin();
+    void update();
+    void showText(const char* text);
+private:
+    TFT_eSPI _tft;
+    bool _initialized;
+};
+extern DisplayManager Display;
+```
+
+**Pattern 2: Config First**
+Always start by extracting config.h before splitting code:
+```cpp
+// config.h
+#define LED_PIN 2
+#define SENSOR_PIN 34
+#define BAUD_RATE 115200
+```
+
+**Pattern 3: Global Instances**
+Make modules easily accessible:
+```cpp
+// In .h: extern DisplayManager Display;
+// In .cpp: DisplayManager Display;
+// Usage: Display.showText("Hello");
+```
+
+### Arduino CLI Compilation Notes
+
+**Important:** Arduino CLI automatically compiles:
+- All .cpp files in sketch directory
+- All .cpp files in subdirectories
+- Main .ino file (converted to .cpp internally)
+
+**You must:**
+- Use include guards in all .h files (`#ifndef`/`#define`/`#endif`)
+- Include module header first in each .cpp
+- Put declarations in .h, implementations in .cpp
+- Keep .cpp files in sketch directory
+
+**Common compilation errors after refactoring:**
+- "multiple definition" → Implementation in .h file
+- "undefined reference" → Missing .cpp or wrong signature
+- "not declared" → Missing #include or forward declaration
+
+See `references/code_organization.md` for detailed troubleshooting.
+
+### Working Examples
+
+Study these complete examples in `references/examples/`:
+
+**simple_modular/** - Basic 3-module project
+- LED controller, button handler, sensor reader
+- ~365 lines across 7 files
+- Shows fundamental patterns
+- Good starting point for learning
+
+**cyd_display_project/** - Complex CYD organization
+- Display, touch, WiFi, SD card modules
+- SPI bus coordination
+- CYD-specific pin management
+- Production-ready structure
+
+### Common Refactoring Pitfalls
+
+❌ **Don't** put everything in headers
+✅ **Do** use .h for declarations, .cpp for implementations
+
+❌ **Don't** create circular includes (A includes B, B includes A)
+✅ **Do** use forward declarations to break circular dependencies
+
+❌ **Don't** refactor everything at once
+✅ **Do** refactor one module at a time, testing each
+
+❌ **Don't** forget include guards
+✅ **Do** add include guards to every .h file
+
+❌ **Don't** access hardware directly from main
+✅ **Do** access through clean module interfaces
+
+### Testing After Refactoring
+
+**Checklist:**
+- [ ] Compiles without errors or warnings
+- [ ] All original functionality works
+- [ ] No memory leaks (check `ESP.getFreeHeap()`)
+- [ ] Each module can be tested independently
+- [ ] Code is more readable and maintainable
+- [ ] Modules follow consistent patterns
+
+**Test each module independently:**
+```cpp
+// test/test_display.ino
+#include "display_manager.h"
+
+void setup() {
+    Serial.begin(115200);
+    if (Display.begin()) {
+        Display.showText("Test OK");
+    }
+}
+
+void loop() {}
+```
+
 ## Development Tips
 
 ### Pin Selection Strategy
@@ -358,11 +594,46 @@ Read the appropriate reference file(s) based on your needs:
 5. Start simple, add complexity incrementally
 
 ### Code Organization
-1. Use config.h for all constants and pin definitions
-2. Separate concerns into modular .h/.cpp files
-3. Use `#ifdef DEBUG` for removable debug code
-4. Add include guards to all headers
-5. Keep ISRs short and in IRAM (`IRAM_ATTR`)
+1. **Use config.h for all constants and pin definitions**
+   - Centralize all #define statements
+   - Group by category (pins, timing, features)
+   - Makes board adaptation easy
+
+2. **Separate concerns into modular .h/.cpp files**
+   - One module = one responsibility
+   - Public interface in .h (declarations)
+   - Implementation in .cpp (definitions)
+   - See `references/code_organization.md` for patterns
+   - Study `references/examples/simple_modular/` for working example
+
+3. **Use `#ifdef DEBUG` for removable debug code**
+   - Define in config.h: `#define DEBUG_MODE 1`
+   - Wrap debug output: `#ifdef DEBUG_MODE Serial.println(...); #endif`
+   - Or use macros: `DEBUG_PRINTLN(x)`
+   - Eliminates performance overhead in production
+
+4. **Add include guards to all headers**
+   - Use `#ifndef MODULE_H` / `#define MODULE_H` / `#endif`
+   - Or use `#pragma once` (simpler, widely supported)
+   - Prevents multiple inclusion errors
+
+5. **Keep ISRs short and in IRAM**
+   - Use `IRAM_ATTR` attribute for ISR functions
+   - Set flags in ISR, process in loop()
+   - Avoids crashes during flash operations
+   - Example: `void IRAM_ATTR onTimer() { flag = true; }`
+
+6. **Follow consistent naming conventions**
+   - Classes: PascalCase (DisplayManager)
+   - Functions/methods: camelCase (begin, getValue)
+   - Private members: _leadingUnderscore (_initialized)
+   - Constants: UPPER_CASE (LED_PIN, BAUD_RATE)
+   - Global instances: Capital (Display, WiFi)
+
+**For detailed organization patterns, architecture guidance, and refactoring workflows:**
+- Read `references/code_organization.md` (comprehensive guide)
+- Study working examples in `references/examples/`
+- Use `assets/modular_template/` as starting point
 
 ## Scripts Reference
 
