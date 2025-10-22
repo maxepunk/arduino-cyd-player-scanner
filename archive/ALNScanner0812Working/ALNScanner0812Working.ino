@@ -2508,9 +2508,13 @@ void setup() {
     }
 }
 
-// ─── Main Loop ────────────────────────────────────────────────────
-void loop() {
-    // ═══ Serial Command Interface (Orchestrator Debug) ═══════════
+// ─── Serial Command Handler (Phase 6 Fix - Non-blocking) ─────────
+/**
+ * Process serial commands if available
+ * Called multiple times per loop() to ensure responsive command processing
+ * even when loop() is busy with RFID scanning or image display
+ */
+void processSerialCommands() {
     if (Serial.available()) {
         String cmd = Serial.readStringUntil('\n');
         cmd.trim();
@@ -2697,7 +2701,12 @@ void loop() {
             Serial.println("  HELP          - Show this help\n");
         }
     }
-    // ══════════════════════════════════════════════════════════════
+}
+
+// ─── Main Loop ────────────────────────────────────────────────────
+void loop() {
+    // Process serial commands (responsive - called multiple times per loop)
+    processSerialCommands();
 
     // Process audio if playing
     if (wav && wav->isRunning()) {
@@ -2705,7 +2714,10 @@ void loop() {
             stopAudio();
         }
     }
-    
+
+    // Check for commands before image display handling
+    processSerialCommands();
+
     // Handle image display state
     if (imageIsDisplayed) {
         if (touchInterruptOccurred) {
@@ -2776,6 +2788,10 @@ void loop() {
     // Small delay between scans to let the field stabilize
     // INCREASED TO 500ms to reduce beeping frequency
     static uint32_t lastScanTime = 0;
+
+    // Check for commands during RFID wait period (responsive command processing)
+    processSerialCommands();
+
     if (millis() - lastScanTime < 500) {  // Changed from 100ms to 500ms
         // Keep MOSI pin LOW between scans to minimize coupling
         digitalWrite(SOFT_SPI_MOSI, LOW);

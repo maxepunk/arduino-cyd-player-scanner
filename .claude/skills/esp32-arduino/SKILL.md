@@ -18,6 +18,34 @@ Use this skill for:
 - Integrating peripherals (displays, sensors, RFID readers, etc.)
 - Troubleshooting compilation, upload, and runtime errors
 
+## Serial Communication - Critical for Development
+
+Serial communication is essential for ESP32 development. Use the dedicated reference and scripts when:
+- Capturing boot sequences
+- Sending commands to running devices
+- Debugging serial command processing
+- Testing device responses
+- Diagnosing communication issues
+
+**Reference:** `references/serial_communication.md` - Read for:
+- Reliable serial communication patterns
+- Decision tree for choosing the right approach
+- Common pitfalls and solutions
+- Background task conflicts
+- Comprehensive troubleshooting
+
+**Critical Scripts:**
+- `capture_boot.sh` - Capture complete boot sequence after reset
+- `send_serial_command.sh` - Send single command with response capture
+- `test_serial_interactive.sh` - Interactive/batch command testing
+- `diagnose_serial.sh` - Comprehensive serial diagnostics
+
+**Most Common Issues:**
+1. **No serial output** → Run: `./scripts/diagnose_serial.sh`
+2. **Commands not processed** → Read: `serial_communication.md` section "Background Task Conflicts"
+3. **Missing boot messages** → Use: `./scripts/capture_boot.sh` (starts monitor BEFORE reset)
+4. **Port in use** → Scripts automatically clean up, or run: `pkill -f "cat /dev/ttyUSB0"`
+
 ## Quick Start Workflow
 
 ### 1. Initial Setup (First Time Only)
@@ -121,6 +149,23 @@ cp assets/config_template.h config.h
 
 Read the appropriate reference file(s) based on your needs:
 
+### Serial Communication (NEW - Critical for Development)
+**File:** `references/serial_communication.md`
+**Read when:** Any serial communication task, debugging command processing, or communication failures
+
+**Covers:**
+- Reliable patterns for boot capture, monitoring, command sending
+- Decision tree for choosing the right approach
+- Common pitfalls (port exclusivity, timing, baud rate)
+- Background task conflicts affecting command processing
+- Comprehensive troubleshooting workflows
+
+**Critical concepts:**
+- Serial ports are exclusive (only one process at a time)
+- Boot messages need monitoring BEFORE reset
+- Commands need 2-3 second delays between sends
+- processSerialCommands() must be called frequently in loop()
+
 ### Getting Started
 **File:** `references/getting_started.md`
 **Read when:** First time using ESP32 or Arduino CLI, or need quick command reference
@@ -167,6 +212,18 @@ Read the appropriate reference file(s) based on your needs:
 - Memory issues and leak detection
 - WiFi problems and display issues
 
+### Serial Communication Testing
+**File:** `references/serial_testing.md`
+**Read when:** Serial commands not working, need to test command interface, or debug serial communication
+
+**Covers:**
+- Systematic serial testing workflow (4 phases)
+- Common serial issues and solutions
+- Testing serial commands programmatically
+- Best practices for command interfaces
+
+**CRITICAL:** Process serial commands frequently in loop(). Long delays block command processing.
+
 ### Board-Specific Documentation
 **Directory:** `references/hardware_specs/`
 **Read when:** Working with a specific board (e.g., CYD, custom boards)
@@ -174,6 +231,48 @@ Read the appropriate reference file(s) based on your needs:
 **Example:** `references/hardware_specs/CYD_ESP32-2432S028R.md` - Complete CYD pinout
 
 ## Common Development Scenarios
+
+### Scenario: No Serial Output After Upload
+
+**Symptoms:** Upload succeeds but no serial output visible
+
+**Actions:**
+1. Run diagnostic: `./scripts/diagnose_serial.sh`
+2. If port accessible but no data: capture boot with `./scripts/capture_boot.sh`
+3. Check if device is running: look for LED activity
+4. Verify Serial.begin(115200) in code setup()
+
+### Scenario: Commands Not Being Processed
+
+**Symptoms:** Send commands via serial, no response from device
+
+**Actions:**
+1. Read **serial_communication.md** section "Background Task Conflicts"
+2. Verify device is outputting anything: `timeout 5 cat /dev/ttyUSB0`
+3. Check if processSerialCommands() or Serial.available() is called in loop()
+4. Test with simple command: `./scripts/send_serial_command.sh /dev/ttyUSB0 "HELP" 5 10`
+5. Ensure loop() is not blocked by delays or long operations
+
+### Scenario: Missing Boot Messages
+
+**Symptoms:** Device boots but no boot sequence visible
+
+**Actions:**
+1. Use capture script: `./scripts/capture_boot.sh /dev/ttyUSB0`
+2. Start monitor BEFORE pressing reset button (script does this)
+3. Check baud rate: `stty -F /dev/ttyUSB0 115200`
+4. If still empty, check if Serial.begin() is early in setup()
+
+### Scenario: Intermittent Serial Communication
+
+**Symptoms:** Sometimes works, sometimes doesn't
+
+**Actions:**
+1. Check for port conflicts: `lsof /dev/ttyUSB0`
+2. Kill competing processes: `pkill -f "cat /dev/ttyUSB0"`
+3. Verify USB cable quality (try different cable)
+4. Check for brownout resets: see boot capture for reset reasons
+5. Add delays between commands (minimum 2 seconds)
 
 ### Scenario: Boot Failure or No Serial Output
 
@@ -225,6 +324,23 @@ Read the appropriate reference file(s) based on your needs:
 3. For more pins, sacrifice RGB LED or SD card
 4. Display uses HSPI, external SPI devices should use VSPI
 
+### Scenario: Serial Commands Not Working
+
+**Symptoms:** Commands sent to ESP32 get no response, or serial output is missing
+
+**Actions:**
+1. Read **serial_testing.md** for complete serial testing workflow
+2. Test basic connection: `./scripts/test_serial_connection.sh`
+3. Capture boot sequence: `./scripts/capture_serial.sh --duration 10`
+4. Test single command: `./scripts/test_serial_command.sh --command "HELP"`
+5. Check if Serial processing happens frequently enough in code
+
+**Common causes:**
+- Serial.begin() not called or wrong baudrate
+- Serial commands blocked by long delays in loop()
+- Commands not being read (Serial.available() not checked)
+- Wrong line endings (need \n character)
+
 ## Development Tips
 
 ### Pin Selection Strategy
@@ -252,20 +368,84 @@ Read the appropriate reference file(s) based on your needs:
 
 All scripts accept `--help` for detailed usage information.
 
-### setup_arduino_cli.sh
+### Development Setup
+
+#### setup_arduino_cli.sh
 Installs Arduino CLI, ESP32 core, and common libraries. Run once per system.
 
-### verify_setup.sh
+#### verify_setup.sh
 Validates complete development environment. Run after setup or when encountering issues.
 
-### compile_esp32.sh
+### Compilation and Upload
+
+#### compile_esp32.sh
 Compiles sketches with configurable FQBN options. Supports verbose output, binary export, and custom build properties.
 
-### upload_esp32.sh
+#### upload_esp32.sh
 Uploads compiled sketches to ESP32 boards. Auto-detects port or accepts explicit port specification. Configurable upload speed.
 
-### monitor_serial.sh
+### Serial Communication
+
+#### monitor_serial.sh
+**Use when:** Need to watch real-time serial output
+
+Basic serial monitoring with configurable baudrate. Close before uploading.
+
+```bash
+./scripts/monitor_serial.sh
+./scripts/monitor_serial.sh --baudrate 9600
+```
+
+#### test_serial_connection.sh
+**Use when:** Serial not working and need to diagnose basic connectivity
+
+Comprehensive 4-phase test: port detection, permissions, configuration, data reception. First diagnostic step when serial issues occur.
+
+```bash
+./scripts/test_serial_connection.sh
+./scripts/test_serial_connection.sh --duration 10
+```
+
+#### capture_serial.sh
+**Use when:** Need to capture serial output to a file (boot sequences, logs)
+
+Captures serial output to file with proper cleanup. Allows time for manual reset. Automatically analyzes results.
+
+```bash
+# Capture 10 seconds after pressing reset
+./scripts/capture_serial.sh --duration 10 --wait 2
+
+# Immediate capture (no wait)
+./scripts/capture_serial.sh --duration 5 --wait 0
+
+# Save to specific file
+./scripts/capture_serial.sh --output boot_log.txt --duration 15
+```
+
+#### test_serial_command.sh
+**Use when:** Testing serial command interface (single or multiple commands)
+
+Sends commands and captures responses. Supports single command or interactive mode with proper timing and cleanup.
+
+```bash
+# Test single command
+./scripts/test_serial_command.sh --command "STATUS"
+
+# Interactive mode
+./scripts/test_serial_command.sh --interactive
+
+# Custom timeout and save to file
+./scripts/test_serial_command.sh --command "HELP" --timeout 5 --output responses.log
+```
+
+### Basic Monitoring
+
+#### monitor_serial.sh
 Monitors serial output from ESP32. Configurable baudrate. Close before uploading.
+
+```bash
+./scripts/monitor_serial.sh /dev/ttyUSB0
+```
 
 ## Advanced Topics
 

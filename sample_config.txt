@@ -1,0 +1,97 @@
+# ═══════════════════════════════════════════════════════════════
+# NeurAI Memory Scanner - Configuration File
+# ═══════════════════════════════════════════════════════════════
+# Copy this file to your SD card as "config.txt"
+# All settings can be updated via serial commands in debug mode:
+#   SET_CONFIG:KEY=VALUE
+#   SAVE_CONFIG
+#   REBOOT
+# ═══════════════════════════════════════════════════════════════
+
+# ─── WiFi Configuration (REQUIRED) ──────────────────────────────
+# Network SSID (1-32 characters)
+WIFI_SSID=Sidewinder
+
+# WiFi password (0-63 characters, can be empty for open networks)
+WIFI_PASSWORD=wifi4us!
+
+# ─── Orchestrator Configuration (REQUIRED) ──────────────────────
+# Full URL to orchestrator server (must start with http://)
+# Example: http://192.168.1.100:3000
+ORCHESTRATOR_URL=http://10.0.0.177:3000
+
+# Team ID (exactly 3 digits: 001-999)
+TEAM_ID=001
+
+# ─── Device Configuration (OPTIONAL) ────────────────────────────
+# Device ID (alphanumeric + underscore, max 100 characters)
+# If not specified, auto-generated from MAC address as SCANNER_XXXXXXXXXXXX
+# Uncomment to set a custom device ID:
+# DEVICE_ID=SCANNER_FLOOR1_001
+
+# ─── Token Synchronization (OPTIONAL) ───────────────────────────
+# Sync token database from orchestrator on boot
+# Options: true, false (default: true)
+# Set to false to use cached tokens.json (saves ~2-5 seconds on boot)
+SYNC_TOKENS=true
+
+# ─── Debug Mode (OPTIONAL) ──────────────────────────────────────
+# Control RFID initialization behavior
+# Options: true, false (default: false)
+#
+# DEBUG_MODE=true:
+#   - RFID initialization deferred until START_SCANNER command
+#   - Serial commands available (CONFIG, STATUS, SET_CONFIG, etc.)
+#   - Useful for development, configuration changes, troubleshooting
+#   - Send START_SCANNER when ready to scan (disables serial input)
+#
+# DEBUG_MODE=false:
+#   - RFID initializes immediately at boot
+#   - Device starts scanning automatically (production mode)
+#   - Serial input NOT available (GPIO 3 conflict)
+#   - Emergency override: Press ANY key during 30-second boot countdown
+#
+# Recommended settings:
+#   - Development/Testing: true
+#   - Production deployment: false
+DEBUG_MODE=false
+
+# ═══════════════════════════════════════════════════════════════
+# CONFIGURATION EXAMPLES
+# ═══════════════════════════════════════════════════════════════
+
+# ─── Development/Testing Setup ──────────────────────────────────
+# WIFI_SSID=DevNetwork
+# WIFI_PASSWORD=devpass123
+# ORCHESTRATOR_URL=http://192.168.1.100:3000
+# TEAM_ID=999
+# SYNC_TOKENS=true
+# DEBUG_MODE=true
+
+# ─── Production Deployment ──────────────────────────────────────
+# WIFI_SSID=ProductionNetwork
+# WIFI_PASSWORD=prodpass456
+# ORCHESTRATOR_URL=http://10.0.0.50:3000
+# TEAM_ID=001
+# DEVICE_ID=SCANNER_LOBBY_A
+# SYNC_TOKENS=false
+# DEBUG_MODE=false
+
+# ─── Offline/Standalone Mode ────────────────────────────────────
+# WIFI_SSID=OfflineNetwork
+# WIFI_PASSWORD=
+# ORCHESTRATOR_URL=http://192.168.1.1:3000
+# TEAM_ID=001
+# SYNC_TOKENS=false
+# DEBUG_MODE=false
+# (Scans will queue locally and upload when connection restored)
+
+# ═══════════════════════════════════════════════════════════════
+# NOTES
+# ═══════════════════════════════════════════════════════════════
+# - Lines starting with # are comments (ignored)
+# - Remove the # to activate a commented setting
+# - Spaces around = are optional (KEY=VALUE or KEY = VALUE)
+# - Changes take effect after reboot
+# - Use CONFIG command via serial to verify settings
+# ═══════════════════════════════════════════════════════════════
