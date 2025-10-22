@@ -13,7 +13,7 @@
 WIFI_SSID=Sidewinder
 
 # WiFi password (0-63 characters, can be empty for open networks)
-WIFI_PASSWORD=wifi4us!
+WIFI_PASSWORD=
 
 # ─── Orchestrator Configuration (REQUIRED) ──────────────────────
 # Full URL to orchestrator server (must start with http://)
