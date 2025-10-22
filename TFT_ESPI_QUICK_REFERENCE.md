@@ -11,8 +11,8 @@ Do you have 1 or 2 USB ports on your CYD?
 │
 └─ 2 USB (micro + Type-C)
    └─► Use ST7789 Configuration
-       └─► Backlight = GPIO27 (usually)
-           └─► If dark, try GPIO21
+       └─► Backlight = GPIO21 (verified working)
+           └─► If dark, try GPIO27
 ```
 
 ## 📁 File Location
@@ -64,7 +64,7 @@ Find and edit: `Arduino/libraries/TFT_eSPI/User_Setup.h`
 #define TFT_CS   15
 #define TFT_DC    2
 #define TFT_RST  -1
-#define TFT_BL   27  // ← Try 27 first, then 21 if dark
+#define TFT_BL   21  // ← Backlight (verified working on dual USB CYD)
 
 #define TOUCH_CS 33
 #define SPI_FREQUENCY  40000000
@@ -79,12 +79,29 @@ Find and edit: `Arduino/libraries/TFT_eSPI/User_Setup.h`
 #define SMOOTH_FONT
 ```
 
+## ⚠️ Important: No Driver Modifications Required
+
+**The TFT_eSPI library works correctly with the default driver files - NO modifications needed!**
+
+**What you need to configure:**
+- ✅ `User_Setup.h` - Copy the configuration above
+
+**What you DON'T need to modify:**
+- ❌ `TFT_Drivers/ST7789_Init.h` - Leave this file unchanged
+- ❌ Any other driver files
+
+**Note about color inversion:**
+- The ST7789 driver includes the `ST7789_INVON` command (line 102 in ST7789_Init.h)
+- This is CORRECT and should NOT be commented out
+- Current v4.1 ALNScanner sketch displays colors correctly with default driver
+- Only use `#define TFT_INVERSION_ON` in User_Setup.h if you observe actual color inversion
+
 ## 🔧 Quick Fixes
 
 | Problem | Solution |
 |---------|----------|
 | **Screen is black** | Wrong backlight pin - swap 21 ↔ 27 |
-| **Colors inverted** | Add: `#define TFT_INVERSION_ON` |
+| **Colors inverted** | Try: `#define TFT_INVERSION_ON` in User_Setup.h (rare) |
 | **Red shows as Blue** | Change: `TFT_RGB_ORDER TFT_BGR` → `TFT_RGB` |
 | **Display mirrored** | In sketch: try `tft.setRotation(1);` |
 | **Compilation error** | Check only ONE driver defined |
@@ -100,11 +117,11 @@ TFT_eSPI tft = TFT_eSPI();
 
 void setup() {
   tft.init();
-  
-  // Test 1: Backlight
-  pinMode(21, OUTPUT); digitalWrite(21, HIGH);
-  pinMode(27, OUTPUT); digitalWrite(27, HIGH);
-  
+
+  // Test 1: Backlight (enable both, one will work)
+  pinMode(21, OUTPUT); digitalWrite(21, HIGH);  // Primary for dual USB
+  pinMode(27, OUTPUT); digitalWrite(27, HIGH);  // Alternate
+
   // Test 2: Colors (should see R-G-B bars)
   tft.fillRect(0, 0, 80, 240, TFT_RED);
   tft.fillRect(80, 0, 80, 240, TFT_GREEN);
@@ -238,4 +255,19 @@ If everything is broken, reinstall TFT_eSPI:
 
 **Remember**: This is a ONE-TIME setup. Once configured correctly, you don't need to change it again unless switching to different CYD model!
 
-W
+---
+
+## 📝 Document Update History
+
+**Last Updated:** October 21, 2025
+
+**Changes:**
+- ✅ Corrected backlight pin for dual USB CYD (GPIO21, not GPIO27)
+- ✅ Removed outdated information about modifying ST7789_Init.h
+- ✅ Clarified that default TFT_eSPI driver files work correctly without modification
+- ✅ Updated color inversion guidance to reflect current working configuration
+
+**Verified Configuration:**
+- Hardware: ESP32-2432S028R (Dual USB CYD with ST7789 display)
+- Sketch: ALNScanner1021_Orchestrator v4.1
+- Status: ✅ Working correctly with above configuration
