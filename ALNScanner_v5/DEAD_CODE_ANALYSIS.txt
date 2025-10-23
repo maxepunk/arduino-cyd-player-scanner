@@ -1,0 +1,281 @@
+═══════════════════════════════════════════════════════════════════════════
+ DEAD CODE DETECTION REPORT - ALNScanner v5.0
+═══════════════════════════════════════════════════════════════════════════
+ Analysis Date: October 22, 2025
+ Codebase: /home/maxepunk/projects/Arduino/ALNScanner_v5/
+ Files Analyzed: 20 header files
+═══════════════════════════════════════════════════════════════════════════
+
+EXECUTIVE SUMMARY
+═════════════════
+
+✅ CODEBASE STATUS: EXCEPTIONALLY CLEAN
+• HTTP consolidation (15KB) ALREADY COMPLETE
+• Only ~500 bytes unused code found (0.03% of flash)
+• No commented blocks or #if 0 sections
+• Stub methods intentionally deferred to Phase 5
+
+ESTIMATED FLASH SAVINGS: 400-500 bytes
+
+═══════════════════════════════════════════════════════════════════════════
+SECTION 1: UNUSED FUNCTIONS (5 CONFIRMED DEAD)
+═══════════════════════════════════════════════════════════════════════════
+
+1. RFIDReader::resetStats()
+   ────────────────────────
+   Location:    hal/RFIDReader.h:62
+   Definition:  void resetStats() { _stats = {}; }
+   Calls Found: 0
+   Purpose:     Reset RFID scan statistics
+   Status:      ❌ DEAD CODE - Never called
+   Action:      REMOVE
+   Flash Impact: ~30 bytes
+
+2. DisplayDriver::clear()
+   ──────────────────────
+   Location:    hal/DisplayDriver.h:271-273
+   Definition:  inline void clear() { fillScreen(TFT_BLACK); }
+   Calls Found: 0 (all code uses fillScreen(TFT_BLACK) directly)
+   Purpose:     Convenience wrapper for fillScreen
+   Status:      ❌ DEAD CODE - Never called
+   Action:      REMOVE
+   Flash Impact: ~20 bytes
+
+3. TokenService::printToken()
+   ──────────────────────────
+   Location:    services/TokenService.h:302-309
+   Definition:  void printToken(const String& tokenId) const
+   Calls Found: 0
+   Purpose:     Debug function to print token details
+   Status:      ❌ DEAD CODE - Never called
+   Action:      REMOVE
+   Flash Impact: ~80 bytes
+
+4. SerialService::printRegisteredCommands()
+   ─────────────────────────────────────────
+   Location:    services/SerialService.h:185-194
+   Definition:  void printRegisteredCommands() const
+   Calls Found: 0
+   Purpose:     Debug function to list registered commands
+   Status:      ❌ DEAD CODE - Superseded by HELP command
+   Action:      REMOVE
+   Flash Impact: ~100 bytes
+
+5. AudioDriver::silenceDAC()
+   ──────────────────────────
+   Location:    hal/AudioDriver.h:86-94
+   Definition:  void silenceDAC() { pinMode...; digitalWrite...; }
+   Calls Found: 0 (logic DUPLICATED in Application.h:675-678)
+   Purpose:     Silence I2S DAC pins to prevent electrical noise
+   Status:      ❌ DEAD CODE - Function never called, logic duplicated
+   Action:      REMOVE function, fix Application.h to call it instead
+   Flash Impact: ~100 bytes
+
+SUBTOTAL: 330 bytes saved from unused functions
+
+═══════════════════════════════════════════════════════════════════════════
+SECTION 2: DUPLICATE CODE (1 INSTANCE FOUND)
+═══════════════════════════════════════════════════════════════════════════
+
+DAC Silencing Logic
+───────────────────
+Duplicate 1: Application::initializeHardware() lines 675-678
+  pinMode(pins::DAC_SILENCE_1, OUTPUT);
+  pinMode(pins::DAC_SILENCE_2, OUTPUT);
+  digitalWrite(pins::DAC_SILENCE_1, LOW);
+  digitalWrite(pins::DAC_SILENCE_2, LOW);
+
+Duplicate 2: hal/AudioDriver.h:86-93 (silenceDAC function)
+  [Exact same logic]
+
+Issue:  Application.h duplicates logic instead of calling AudioDriver method
+Fix:    Replace Application.h lines 675-678 with: audio.silenceDAC();
+Impact: ~80 bytes saved (eliminate 3 lines of duplicate code)
+
+SUBTOTAL: 80 bytes saved from consolidation
+
+═══════════════════════════════════════════════════════════════════════════
+SECTION 3: FUNCTIONS TO KEEP (8 ANALYZED, ALL JUSTIFIED)
+═══════════════════════════════════════════════════════════════════════════
+
+✅ KEEP: Application::registerSerialCommands() (stub)
+   Reason: Will be implemented in Phase 5 integration
+   Status: Intentional defer (documented in code)
+
+✅ KEEP: Application::startBackgroundTasks() (stub)
+   Reason: Will be implemented in Phase 5 integration
+   Status: Intentional defer (documented in code)
+
+✅ KEEP: OrchestratorService::printQueue()
+   Reason: Needed for SHOW_QUEUE serial command (Phase 5)
+   Status: Pre-implemented for serial integration
+
+✅ KEEP: OrchestratorService::clearQueue()
+   Reason: Needed for CLEAR_QUEUE serial command (Phase 5)
+   Status: Pre-implemented for serial integration
+
+✅ KEEP: Application::printResetReason()
+   Reason: Called from setup() - boot diagnostics
+   Status: Actively used
+
+✅ KEEP: Application::printBootBanner()
+   Reason: Called from setup() - boot sequence
+   Status: Actively used
+
+✅ KEEP: DisplayDriver::displayError()
+   Reason: Internal error handling (4 calls in DisplayDriver.h)
+   Status: Actively used
+
+✅ KEEP: RFIDReader::spiClockDelay()
+   Reason: Internal helper (~10 calls in RFIDReader.h)
+   Status: Actively used
+
+═══════════════════════════════════════════════════════════════════════════
+SECTION 4: MEMBER VARIABLES (ALL VERIFIED AS USED)
+═══════════════════════════════════════════════════════════════════════════
+
+✅ Application::_bootOverrideReceived
+   Set:  Application::handleBootOverride()
+   Read: Application::initializeServices()
+   Status: USED - Boot override logic
+
+✅ UIStateMachine::_tokenScreenPtr
+   Set:  UIStateMachine::showToken()
+   Read: UIStateMachine::update() (audio updates)
+   Status: USED - Audio update tracking
+
+✅ No unused member variables found
+
+═══════════════════════════════════════════════════════════════════════════
+SECTION 5: COMMENTED CODE BLOCKS
+═══════════════════════════════════════════════════════════════════════════
+
+✅ SEARCH RESULTS: 0 commented blocks found
+   • No #if 0 blocks
+   • No /* ... */ code blocks
+   • Codebase is clean
+
+═══════════════════════════════════════════════════════════════════════════
+SECTION 6: FLASH SAVINGS BREAKDOWN
+═══════════════════════════════════════════════════════════════════════════
+
+Category                          Function/Code                 Savings
+────────────────────────────────────────────────────────────────────────
+Unused Functions                  RFIDReader::resetStats()      30 bytes
+                                  DisplayDriver::clear()         20 bytes
+                                  TokenService::printToken()     80 bytes
+                                  SerialService::printReg...    100 bytes
+                                  AudioDriver::silenceDAC()     100 bytes
+                                                                ─────────
+                                  SUBTOTAL:                     330 bytes
+
+Duplicate Code Consolidation      DAC silence logic              80 bytes
+                                                                ─────────
+                                  SUBTOTAL:                      80 bytes
+
+                                                                ─────────
+                                  TOTAL SAVINGS:                410 bytes
+═══════════════════════════════════════════════════════════════════════════
+
+CONSERVATIVE ESTIMATE: 400-500 bytes (0.03% of 1.2MB flash)
+
+Note: Stub overhead (registerSerialCommands, startBackgroundTasks) will be
+replaced by full implementations in Phase 5. Current overhead: ~100 bytes.
+
+═══════════════════════════════════════════════════════════════════════════
+SECTION 7: RECOMMENDATIONS (PRIORITY-SORTED)
+═══════════════════════════════════════════════════════════════════════════
+
+PRIORITY 1: REMOVE UNUSED FUNCTIONS (330 bytes)
+────────────────────────────────────────────────
+Risk:   LOW - No dependencies found
+Effort: 5 minutes
+Tasks:
+  1. Delete RFIDReader::resetStats() from hal/RFIDReader.h:62
+  2. Delete DisplayDriver::clear() from hal/DisplayDriver.h:271-273
+  3. Delete TokenService::printToken() from services/TokenService.h:302-309
+  4. Delete SerialService::printRegisteredCommands() from services/SerialService.h:185-194
+  5. Delete AudioDriver::silenceDAC() from hal/AudioDriver.h:86-94
+
+Verification: arduino-cli compile (should show no errors)
+
+
+PRIORITY 2: CONSOLIDATE DUPLICATE CODE (80 bytes)
+──────────────────────────────────────────────────
+Risk:   LOW - Exact same logic
+Effort: 2 minutes
+Tasks:
+  1. In Application.h lines 675-678, replace:
+       pinMode(pins::DAC_SILENCE_1, OUTPUT);
+       pinMode(pins::DAC_SILENCE_2, OUTPUT);
+       digitalWrite(pins::DAC_SILENCE_1, LOW);
+       digitalWrite(pins::DAC_SILENCE_2, LOW);
+     
+     With:
+       audio.silenceDAC();  // Use AudioDriver method
+
+Verification: Test hardware initialization on physical device
+
+
+PRIORITY 3: DEFER TO PHASE 5 (No action now)
+─────────────────────────────────────────────
+Risk:   N/A
+Effort: N/A
+Tasks:
+  1. registerSerialCommands() - Will be implemented by serial-commands-integrator
+  2. startBackgroundTasks() - Will be implemented by background-task-creator
+  3. OrchestratorService::printQueue() - Keep for SHOW_QUEUE command
+  4. OrchestratorService::clearQueue() - Keep for CLEAR_QUEUE command
+
+═══════════════════════════════════════════════════════════════════════════
+SECTION 8: VERIFICATION COMMANDS
+═══════════════════════════════════════════════════════════════════════════
+
+# Verify functions are unused:
+cd /home/maxepunk/projects/Arduino/ALNScanner_v5
+grep -r "resetStats" --include="*.h" --include="*.cpp" --include="*.ino"
+grep -r "\.clear()" --include="*.h" --include="*.cpp" --include="*.ino"
+grep -r "printToken" --include="*.h" --include="*.cpp" --include="*.ino"
+grep -r "printRegisteredCommands" --include="*.h" --include="*.cpp" --include="*.ino"
+grep -r "silenceDAC" --include="*.h" --include="*.cpp" --include="*.ino"
+
+# Compile BEFORE cleanup (baseline):
+arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=default,UploadSpeed=921600 . 2>&1 | grep "Sketch uses"
+
+# Compile AFTER cleanup (should show ~400-500 bytes reduction):
+arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=default,UploadSpeed=921600 . 2>&1 | grep "Sketch uses"
+
+═══════════════════════════════════════════════════════════════════════════
+SECTION 9: CONCLUSION
+═══════════════════════════════════════════════════════════════════════════
+
+FINDING: Codebase demonstrates EXCELLENT code hygiene
+
+KEY INSIGHTS:
+1. ✅ HTTP consolidation (15KB savings) ALREADY COMPLETE in OrchestratorService.h
+2. ✅ Only ~400-500 bytes of unused code found (0.03% of total flash)
+3. ✅ Two stub methods are intentionally deferred (well-documented)
+4. ✅ No large commented blocks or #if 0 sections
+5. ✅ All member variables actively used
+6. ✅ Minimal code duplication (only 1 instance found)
+
+VERDICT: Architecture is clean, modular, and well-optimized
+
+NEXT STEPS:
+1. Remove 5 unused debug functions (330 bytes)
+2. Fix DAC silencing duplication (80 bytes)
+3. Defer stub implementation to Phase 5 integration
+4. Total cleanup time: ~7 minutes
+5. Total savings: ~410 bytes (good practice, minimal impact)
+
+IMPACT ASSESSMENT:
+• Flash savings: 0.03% (negligible)
+• Code clarity: IMPROVED (remove dead code)
+• Maintainability: IMPROVED (eliminate confusion)
+• Risk: MINIMAL (no active dependencies)
+
+═══════════════════════════════════════════════════════════════════════════
+Report Generated: October 22, 2025
+Analyst: Claude Code - Dead Code Detection Specialist
+Status: ANALYSIS COMPLETE
+═══════════════════════════════════════════════════════════════════════════
