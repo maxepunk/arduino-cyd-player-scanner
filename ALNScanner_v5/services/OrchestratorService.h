@@ -26,6 +26,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <vector>
@@ -107,9 +108,10 @@ public:
 
             // Check orchestrator health
             LOG_INFO("\n[ORCH] Checking orchestrator health...\n");
-            LOG_INFO("[ORCH] URL: %s/health\n", config.orchestratorURL.c_str());
+            LOG_INFO("[ORCH] URL: %s/health?deviceId=%s\n",
+                     config.orchestratorURL.c_str(), config.deviceID.c_str());
 
-            if (checkHealth(config.orchestratorURL)) {
+            if (checkHealth(config)) {
                 _connState.set(models::ORCH_CONNECTED);
                 LOG_INFO("[ORCH] ✓✓✓ SUCCESS ✓✓✓ Orchestrator reachable\n");
             } else {
@@ -130,14 +132,14 @@ public:
 
     /**
      * @brief Start background FreeRTOS task for orchestrator sync
-     * @param config Device configuration (for orchestrator URL)
+     * @param config Device configuration (for orchestrator URL and deviceID)
      *
      * Implementation from v4.1 lines 2679-2683, 2447-2496
      * Task runs on Core 0, main loop on Core 1
      */
     void startBackgroundTask(const models::DeviceConfig& config) {
         // Store config for background task (thread-safe copy)
-        _orchestratorURL = config.orchestratorURL;
+        _config = config;
 
         xTaskCreatePinnedToCore(
             backgroundTaskWrapper,
@@ -312,17 +314,18 @@ public:
     // ─── Health Check ──────────────────────────────────────────────────
 
     /**
-     * @brief Check orchestrator health endpoint
-     * @param orchestratorURL Base URL of orchestrator
+     * @brief Check orchestrator health endpoint with device identification
+     * @param config Device configuration (contains orchestratorURL and deviceId)
      * @return true if GET /health returns 200, false otherwise
      *
-     * Implementation from v4.1 lines 1637-1648
+     * Implementation from v4.1 lines 1637-1648 (modified to include deviceId)
      * Uses consolidated HTTP helper (FLASH SAVINGS)
+     * Sends deviceId as query parameter: GET /health?deviceId=SCANNER_001
      */
-    bool checkHealth(const String& orchestratorURL) {
-        if (orchestratorURL.length() == 0) return false;
+    bool checkHealth(const models::DeviceConfig& config) {
+        if (config.orchestratorURL.length() == 0) return false;
 
-        String url = orchestratorURL + "/health";
+        String url = config.orchestratorURL + "/health?deviceId=" + config.deviceID;
         auto resp = _http.httpGET(url);
 
         return (resp.code == 200);
@@ -505,14 +508,14 @@ private:
         mutable portMUX_TYPE mutex;
     } _queue = {0, portMUX_INITIALIZER_UNLOCKED};
 
-    // Orchestrator URL (for background task)
-    String _orchestratorURL;
+    // Device config (for background task - includes orchestratorURL and deviceID)
+    models::DeviceConfig _config;
 
     // ─── HTTP Helper Class (CRITICAL FLASH SAVINGS) ───────────────────
 
     /**
      * @class HTTPHelper
-     * @brief Consolidated HTTP client operations
+     * @brief Consolidated HTTP client operations with HTTPS support
      *
      * **PRIMARY FLASH OPTIMIZATION:** This class consolidates 4 duplicate HTTP
      * client implementations from v4.1 into a single reusable helper.
@@ -524,9 +527,18 @@ private:
      * 4. checkOrchestratorHealth (lines 1637-1648)
      *
      * Consolidating into HTTPHelper saves ~15KB flash by eliminating 3 copies.
+     *
+     * **HTTPS SUPPORT:** Uses WiFiClientSecure with setInsecure() for HTTPS URLs.
+     * Certificate validation is skipped (acceptable for local network deployments).
+     * Required for Android NFC scanning API which mandates HTTPS even on local networks.
      */
     class HTTPHelper {
     public:
+        HTTPHelper() {
+            // Configure secure client to skip certificate validation
+            // This is acceptable for local network orchestrator deployments
+            _secureClient.setInsecure();
+        }
         struct Response {
             int code;           // HTTP response code (or negative for errors)
             String body;        // Response body (if available)
@@ -577,19 +589,29 @@ private:
 
     private:
         /**
-         * @brief Configure HTTP client (consolidated setup)
+         * @brief Configure HTTP client with HTTPS support
          * @param client HTTPClient reference to configure
-         * @param url Full URL to connect to
+         * @param url Full URL to connect to (http:// or https://)
          * @param timeoutMs Request timeout in milliseconds
          *
          * This method contains the shared HTTP client setup code that was
          * previously duplicated across 4 functions. Consolidating here
          * eliminates ~15KB of duplicate code in flash.
+         *
+         * For HTTPS URLs, uses WiFiClientSecure with certificate validation disabled.
+         * This is acceptable for local network deployments where the orchestrator
+         * is on the same network and not exposed to the internet.
          */
         void configureClient(HTTPClient& client, const String& url, uint32_t timeoutMs) {
-            client.begin(url);
+            if (url.startsWith("https://")) {
+                client.begin(_secureClient, url);
+            } else {
+                client.begin(url);
+            }
             client.setTimeout(timeoutMs);
         }
+
+        WiFiClientSecure _secureClient;  // Secure client for HTTPS requests
     };
 
     HTTPHelper _http;  // Singleton HTTP helper instance
@@ -820,7 +842,7 @@ private:
 
                 if (state == models::ORCH_WIFI_CONNECTED || state == models::ORCH_CONNECTED) {
                     // Check orchestrator health
-                    if (checkHealth(_orchestratorURL)) {
+                    if (checkHealth(_config)) {
                         if (state != models::ORCH_CONNECTED) {
                             LOG_INFO("[ORCH-BG-TASK] Orchestrator now reachable\n");
                             _connState.set(models::ORCH_CONNECTED);
@@ -832,10 +854,8 @@ private:
                             LOG_INFO("[ORCH-BG-TASK] Queue has %d entries, starting batch upload\n",
                                      queueSize);
 
-                            // Create temporary config for upload (only URL needed)
-                            models::DeviceConfig config;
-                            config.orchestratorURL = _orchestratorURL;
-                            uploadQueueBatch(config);
+                            // Use stored config for upload (includes orchestratorURL and deviceID)
+                            uploadQueueBatch(_config);
                         }
                     } else {
                         if (state == models::ORCH_CONNECTED) {

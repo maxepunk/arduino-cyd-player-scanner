@@ -1,0 +1,19 @@
+# NeurAI Memory Scanner Configuration
+# Sample configuration for testing ConfigService
+
+# WiFi Configuration (REQUIRED)
+WIFI_SSID=TestNetwork
+WIFI_PASSWORD=test_password
+
+# Orchestrator Configuration (REQUIRED)
+ORCHESTRATOR_URL=http://192.168.1.100:3000
+
+# Team Configuration (REQUIRED)
+TEAM_ID=001
+
+# Device Configuration (OPTIONAL)
+# DEVICE_ID=SCANNER_TEST_001
+
+# Feature Flags (OPTIONAL)
+SYNC_TOKENS=true
+DEBUG_MODE=false

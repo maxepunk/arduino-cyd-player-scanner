@@ -18,7 +18,11 @@
       "Bash(fi)",
       "Read(//home/maxepunk/projects/AboutLastNight/**)",
       "Bash(.specify/scripts/bash/check-prerequisites.sh --json --require-tasks --include-tasks)",
-      "Skill(esp32-arduino)"
+      "Skill(esp32-arduino)",
+      "Bash(tee:*)",
+      "Skill(subagent-orchestration)",
+      "Bash(cat:*)",
+      "Bash(tree:*)"
     ],
     "deny": [],
     "ask": [],

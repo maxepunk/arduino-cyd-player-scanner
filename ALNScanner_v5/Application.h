@@ -540,8 +540,7 @@ inline void Application::processRFIDScan() {
         if (token->isVideoToken()) {
             // Video token - show processing modal (2.5s auto-dismiss)
             LOG_INFO("[SCAN] Video token detected\n");
-            String procImg = token->getProcessingImagePath();
-            _ui->showProcessing(procImg);
+            _ui->showProcessing(*token);
         } else {
             // Regular token - show image + audio (double-tap to dismiss)
             LOG_INFO("[SCAN] Regular token detected\n");
@@ -553,9 +552,8 @@ inline void Application::processRFIDScan() {
 
         models::TokenMetadata fallback;
         fallback.tokenId = tokenId;
-        fallback.image = String(paths::IMAGES_DIR) + tokenId + ".bmp";
-        fallback.audio = String(paths::AUDIO_DIR) + tokenId + ".wav";
         fallback.video = "";  // Not a video token
+        // Note: image/audio paths auto-constructed from tokenId via getImagePath()/getAudioPath()
 
         _ui->showToken(fallback);
     }
@@ -1033,9 +1031,9 @@ inline void Application::registerSerialCommands() {
         const auto* token = tokens.get(tokenId);
         if (token) {
             Serial.printf("Token found: %s\n", token->isVideoToken() ? "VIDEO" : "REGULAR");
-            Serial.printf("  Image: %s\n", token->image.c_str());
+            Serial.printf("  Image: %s\n", token->getImagePath().c_str());
             if (!token->isVideoToken()) {
-                Serial.printf("  Audio: %s\n", token->audio.c_str());
+                Serial.printf("  Audio: %s\n", token->getAudioPath().c_str());
             }
         } else {
             Serial.println("Token not in database (would use UID fallback)");

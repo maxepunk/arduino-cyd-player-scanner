@@ -5,64 +5,40 @@
 
 namespace models {
 
-// Token metadata structure (from v4.1 lines 182-189)
+// Token metadata structure - simplified for v5
+// ALWAYS constructs paths from tokenId (ignores orchestrator metadata fields)
 struct TokenMetadata {
-    String tokenId;           // "kaa001" or UID hex
-    String video;             // "kaa001.mp4" or "" for non-video
-    String image;             // "images/kaa001.bmp"
-    String audio;             // "audio/kaa001.wav"
-    String processingImage;   // "images/kaa001_processing.jpg" (orchestrator path)
+    String tokenId;  // "kaa001" or UID hex - ALWAYS used for path construction
+    String video;    // "kaa001.mp4" or "" - only used for behavior (modal vs persistent)
 
     TokenMetadata() = default;
 
-    // Check if this is a video token
+    // Check if this is a video token (determines UI behavior only)
     bool isVideoToken() const {
         return (video.length() > 0 && video != "null");
     }
 
+    // Clean tokenId for filesystem (remove special chars, convert to lowercase)
+    // Matches v4.1 behavior: remove ":" and " ", then lowercase
+    static String cleanTokenId(const String& rawTokenId) {
+        String clean = rawTokenId;
+        clean.replace(":", "");   // Remove colons (e.g., "04:A1:B2" → "04A1B2")
+        clean.replace(" ", "");   // Remove spaces
+        clean.trim();             // Remove leading/trailing whitespace
+        clean.toLowerCase();      // Convert to lowercase for filesystem
+        return clean;
+    }
+
     // Get image path for display
+    // ALWAYS constructs from tokenId: /assets/images/{cleanTokenId}.bmp
     String getImagePath() const {
-        if (image.length() > 0 && image != "null") {
-            // Ensure path starts with /
-            if (image.startsWith("/")) {
-                return image;
-            } else {
-                return "/" + image;
-            }
-        }
-        // Fallback: construct from tokenId
-        return String(paths::IMAGES_DIR) + tokenId + ".bmp";
+        return String(paths::IMAGES_DIR) + cleanTokenId(tokenId) + ".bmp";
     }
 
     // Get audio path for playback
+    // ALWAYS constructs from tokenId: /assets/audio/{cleanTokenId}.wav
     String getAudioPath() const {
-        if (audio.length() > 0 && audio != "null") {
-            // Ensure path starts with /
-            if (audio.startsWith("/")) {
-                return audio;
-            } else {
-                return "/" + audio;
-            }
-        }
-        // Fallback: construct from tokenId
-        return String(paths::AUDIO_DIR) + tokenId + ".wav";
-    }
-
-    // Get processing image path for video tokens
-    String getProcessingImagePath() const {
-        if (processingImage.length() > 0 && processingImage != "null") {
-            // Extract file extension from processingImage field
-            String extension = ".bmp";  // Default
-            int lastDot = processingImage.lastIndexOf('.');
-            if (lastDot >= 0) {
-                extension = processingImage.substring(lastDot);
-            }
-
-            // Construct SD card path from tokenId
-            return String(paths::IMAGES_DIR) + tokenId + extension;
-        }
-        // Fallback: use regular image
-        return getImagePath();
+        return String(paths::AUDIO_DIR) + cleanTokenId(tokenId) + ".wav";
     }
 
     // Print metadata (for debugging)
@@ -70,9 +46,8 @@ struct TokenMetadata {
         Serial.println("\n--- Token Metadata ---");
         Serial.printf("Token ID: %s\n", tokenId.c_str());
         Serial.printf("Video: %s\n", video.length() > 0 ? video.c_str() : "(none)");
-        Serial.printf("Image: %s\n", image.c_str());
-        Serial.printf("Audio: %s\n", audio.c_str());
-        Serial.printf("Processing Image: %s\n", processingImage.c_str());
+        Serial.printf("Image Path: %s\n", getImagePath().c_str());
+        Serial.printf("Audio Path: %s\n", getAudioPath().c_str());
         Serial.printf("Is Video Token: %s\n", isVideoToken() ? "YES" : "NO");
         Serial.println("----------------------\n");
     }

@@ -68,8 +68,8 @@ namespace paths {
     constexpr const char* CONFIG_FILE = "/config.txt";
     constexpr const char* TOKEN_DB_FILE = "/tokens.json";
     constexpr const char* DEVICE_ID_FILE = "/device_id.txt";
-    constexpr const char* IMAGES_DIR = "/assets/images/";
-    constexpr const char* AUDIO_DIR = "/assets/audio/";
+    constexpr const char* IMAGES_DIR = "/images/";
+    constexpr const char* AUDIO_DIR = "/AUDIO/";
 }
 
 // PPP SIZE LIMITS PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP

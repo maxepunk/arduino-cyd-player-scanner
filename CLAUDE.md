@@ -4,29 +4,54 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ---
 
-## 🎯 PROJECT STATUS: ORCHESTRATOR INTEGRATION IN PROGRESS
+## 🎯 PROJECT STATUS: v5.0 OOP REFACTOR COMPLETE
 
-**Last Updated:** October 21, 2025
+**Last Updated:** October 25, 2025
 **Platform:** Raspberry Pi 5 (Debian 12 Bookworm, Native Linux Arduino CLI)
-**Current Version:** v4.1 (Full Orchestrator Integration - Phases 6-10 Complete)
+**Current Version:** v5.0 (OOP Architecture - Phases 0-5 Complete, Phase 6 Optimization Pending)
 **Hardware:** CYD 2.8" ESP32-2432S028R (ST7789 Dual USB Variant)
 
 ---
 
 ## 📁 ACTIVE SKETCHES - WHICH ONE TO USE?
 
-### 🟢 **PRODUCTION: ALNScanner1021_Orchestrator** (v4.1 - CURRENT)
+### 🟢 **PRODUCTION: ALNScanner_v5** (v5.0 - CURRENT)
 
 ```
-ALNScanner1021_Orchestrator/
-└── ALNScanner1021_Orchestrator.ino  # v4.1 - 3839 lines, 92% flash usage
+ALNScanner_v5/
+├── ALNScanner_v5.ino         # 16 lines (99.6% reduction!)
+├── Application.h             # 1,247 lines (main orchestrator)
+├── config.h                  # 119 lines (all constants)
+├── hal/                      # Hardware Abstraction Layer
+│   ├── SDCard.h             # 276 lines (thread-safe RAII)
+│   ├── RFIDReader.h         # 916 lines (software SPI + NDEF)
+│   ├── DisplayDriver.h      # 440 lines (BMP rendering)
+│   ├── AudioDriver.h        # 227 lines (lazy I2S init)
+│   └── TouchDriver.h        # 118 lines (WiFi EMI filtering)
+├── models/                   # Data Models
+│   ├── Config.h             # 87 lines (validation logic)
+│   ├── Token.h              # 111 lines (metadata + scanning)
+│   └── ConnectionState.h    # 82 lines (thread-safe state)
+├── services/                 # Business Logic
+│   ├── ConfigService.h      # 547 lines (SD config mgmt)
+│   ├── TokenService.h       # 384 lines (token DB queries)
+│   ├── OrchestratorService.h # 900+ lines (HTTP + Queue)
+│   └── SerialService.h      # 278 lines (command registry)
+└── ui/                       # User Interface Layer
+    ├── Screen.h             # 217 lines (Template Method base)
+    ├── UIStateMachine.h     # 366 lines (state + touch routing)
+    └── screens/
+        ├── ReadyScreen.h            # 244 lines
+        ├── StatusScreen.h           # 319 lines
+        ├── TokenDisplayScreen.h     # 379 lines
+        └── ProcessingScreen.h       # 264 lines
 ```
 
-**Status:** ✅ Compiles successfully (1,209,987 bytes / 92% flash)
-**Last Updated:** October 21, 2025
-**Git Branch:** `main`
+**Status:** ✅ Compiles successfully (1,207,147 bytes / 92% flash)
+**Last Updated:** October 25, 2025
+**Git Branch:** `refactor/v5-oop-architecture`
 
-**Full Feature Set:**
+**Full Feature Set:** (Same as v4.1)
 - **Core RFID Scanning:** MFRC522 on software SPI, NDEF text extraction, 7-byte UID support
 - **WiFi Connectivity:** Auto-reconnect, event-driven state management
 - **HTTP Orchestrator Integration:**
@@ -53,45 +78,56 @@ ALNScanner1021_Orchestrator/
   - DEBUG_MODE toggle (GPIO 3 conflict workaround)
   - 30-second boot override for emergency debug access
 
-**Architecture Highlights:**
+**Architecture Highlights (v5.0 OOP):**
+- **Singleton Pattern:** All HAL and service components use getInstance()
+- **Layered Architecture:** HAL → Models → Services → UI → Application
+- **Dependency Injection:** Services accept dependencies via constructor/getInstance()
+- **Design Patterns:** Strategy (screens), State Machine (UI), Facade (Application), RAII (SD locks)
+- **Code Reduction:** Main .ino 3,839 → 16 lines (99.6% reduction)
+- **Maintainability:** All files <1,250 lines, clear responsibilities, easy to test
+- **Memory Safety:** RAII resource management, thread-safe SD access
 - **Dual-core FreeRTOS:** Main loop on Core 1, background sync on Core 0
-- **SD Mutex Protection:** Thread-safe file operations across cores
-- **Atomic State Management:** Critical sections for connection state and queue size
-- **Serial Instrumentation:** Comprehensive logging with timestamps and statistics
 
 ---
 
-### 🔵 **LEGACY: ALNScanner0812Working** (v3.4 - STABLE BASELINE)
+### 🔵 **LEGACY: ALNScanner1021_Orchestrator** (v4.1 - MONOLITHIC BASELINE)
 
 ```
-ALNScanner0812Working.backup  # v3.4 - Single-file backup (archived)
+ALNScanner1021_Orchestrator/
+└── ALNScanner1021_Orchestrator.ino  # v4.1 - 3,839 lines, 92% flash
 ```
 
-**Status:** ⚠️ **DEPRECATED** - Use v4.1 orchestrator instead
-**Purpose:** Fallback reference for core RFID/display functionality
-**Last Stable Commit:** Sept 20, 2025 - `7f2b3f6`
+**Status:** ⚠️ **ARCHIVED** - Use v5.0 OOP architecture instead
+**Purpose:** Reference implementation, baseline for v5.0 refactor
+**Last Updated:** October 21, 2025
 
-**Contains Working Implementations Of:**
-- SPI bus deadlock fix (read SD before locking TFT)
-- BMP bottom-to-top rendering
-- RFID beeping reduction (500ms scan interval)
-- ST7789 display configuration
+**Why v5.0 is Better:**
+- **Maintainability:** 3,839 lines → 20 modular files
+- **Testability:** Each component has test sketch (test-50 through test-60)
+- **Extensibility:** New screens/services trivial to add
+- **Flash Savings:** Phase 6 optimization will reduce 92% → <87% (target <1,150,000 bytes)
+- **Code Quality:** Design patterns, dependency injection, single responsibility
 
-**⚠️ Missing Orchestrator Features** - Does not have WiFi, HTTP, queue, or token sync
+**⚠️ v4.1 Limitations:**
+- Single 3,839-line file (unmaintainable)
+- 468-line if/else command chain
+- Duplicate HTTP code (4 functions, 216 lines)
+- Global variables everywhere
+- Hard to unit test
 
 ---
 
 ## 🛠️ DEVELOPMENT COMMANDS
 
-### **Compile Current Sketch (v4.1)**
+### **Compile Current Sketch (v5.0)**
 
 ```bash
-cd /home/maxepunk/projects/Arduino/ALNScanner1021_Orchestrator
+cd /home/maxepunk/projects/Arduino/ALNScanner_v5
 
 arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=default,UploadSpeed=921600 .
 ```
 
-**Expected Output:** `Sketch uses 1209987 bytes (92%) of program storage space`
+**Expected Output:** `Sketch uses 1207147 bytes (92%) of program storage space`
 
 ### **Upload to Device**
 
@@ -125,9 +161,73 @@ arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=115200
 
 ---
 
-## 🏗️ ARCHITECTURE - ORCHESTRATOR INTEGRATION
+## 🏗️ ARCHITECTURE - v5.0 OOP REFACTOR
 
-### **User Stories Implemented (v4.1)**
+### **Layered Architecture Overview**
+
+```
+┌─────────────────────────────────────────────────┐
+│  Layer 5: Main Entry Point                     │
+│  ALNScanner_v5.ino (16 lines)                  │
+│  - setup(): Application::setup()                │
+│  - loop(): Application::loop()                  │
+└─────────────────────────────────────────────────┘
+                      ▲
+                      │
+┌─────────────────────────────────────────────────┐
+│  Layer 4: Application Orchestrator             │
+│  Application.h (1,247 lines)                   │
+│  - Owns all HAL and Service instances          │
+│  - Coordinates RFID → Orchestrator → UI flow   │
+└─────────────────────────────────────────────────┘
+                      ▲
+        ┌─────────────┼─────────────┐
+        │             │             │
+┌───────▼──────┐ ┌────▼────┐ ┌─────▼──────┐
+│  Services    │ │   UI    │ │    HAL     │
+│  Layer 3     │ │ Layer 3 │ │  Layer 1   │
+└──────────────┘ └─────────┘ └────────────┘
+
+Services (4):          UI (6):              HAL (5):
+- ConfigService   →   UIStateMachine    →   RFIDReader
+- TokenService    →   Screen (base)     →   DisplayDriver
+- OrchestratorSvc →   4x Screen impls   →   AudioDriver
+- SerialService                         →   TouchDriver
+                                       →   SDCard
+```
+
+### **Component Responsibilities**
+
+**HAL Layer (Hardware Abstraction):**
+- `SDCard.h` - Thread-safe SD operations with RAII locks
+- `RFIDReader.h` - Software SPI + NDEF extraction for MFRC522
+- `DisplayDriver.h` - TFT rendering + BMP image loading
+- `AudioDriver.h` - I2S WAV playback (lazy-initialized)
+- `TouchDriver.h` - Interrupt-based touch with WiFi EMI filtering
+
+**Models Layer (Data Structures):**
+- `Config.h` - Device configuration with validation
+- `Token.h` - Token metadata + scan data structures
+- `ConnectionState.h` - Thread-safe orchestrator state
+
+**Services Layer (Business Logic):**
+- `ConfigService.h` - Load/save config, runtime editing
+- `TokenService.h` - Token database queries + orchestrator sync
+- `OrchestratorService.h` - WiFi, HTTP, queue management, background tasks
+- `SerialService.h` - Command registry pattern (replaces 468-line if/else chain)
+
+**UI Layer (User Interface):**
+- `UIStateMachine.h` - 4-state FSM + touch routing
+- `Screen.h` - Template Method base class
+- `ReadyScreen.h` - Idle screen with RFID status
+- `StatusScreen.h` - Diagnostics display (tap-to-view)
+- `TokenDisplayScreen.h` - Token image + audio playback
+- `ProcessingScreen.h` - Video token modal (2.5s auto-dismiss)
+
+**Application Layer (Orchestration):**
+- `Application.h` - Initializes all subsystems, coordinates event flow
+
+### **User Stories Implemented (v5.0 = v4.1 feature parity)**
 
 | Phase | US  | Feature | Status |
 |-------|-----|---------|--------|
@@ -329,7 +429,45 @@ DEBUG_MODE=false (production):
 
 ## 🔥 CRITICAL IMPLEMENTATION PATTERNS
 
-### **1. SPI Bus Deadlock Prevention** ✅ FIXED (Sept 20, 2025)
+### **1. VSPI Bus Initialization Order** ✅ FIXED (October 22, 2025 - v5.0)
+
+**Problem:** SD card and TFT display share the VSPI hardware bus. When initialized in the wrong order, SD file operations fail even though mounting succeeds.
+
+**Root Cause:** The second device to initialize reconfigures VSPI in a way that breaks the first device's file operations.
+
+**Solution:** Initialize Display **BEFORE** SD card
+
+```cpp
+// ✅ CORRECT - v5.0 Initialization Order (Application.h lines 681-723)
+void Application::initializeEarlyHardware() {
+    // 1. Display FIRST - Sets up VSPI for TFT
+    auto& display = hal::DisplayDriver::getInstance();
+    display.begin();  // tft.init() configures VSPI
+
+    // 2. SD Card SECOND - Final VSPI configuration
+    auto& sd = hal::SDCard::getInstance();
+    sd.begin();  // SD reconfigures VSPI compatibly
+
+    // Now SD.open() works correctly! ✅
+}
+
+// ❌ WRONG - v5.0 Initial Attempt (BROKEN)
+void Application::initializeEarlyHardware() {
+    // 1. SD Card first ❌
+    auto& sd = hal::SDCard::getInstance();
+    sd.begin();  // SD configures VSPI
+
+    // 2. Display second ❌
+    auto& display = hal::DisplayDriver::getInstance();
+    display.begin();  // TFT reconfigures VSPI, breaks SD!
+
+    // SD.open() fails! ❌
+}
+```
+
+**⚠️ CRITICAL WARNING:** Any code that changes this initialization order will break SD card file operations. This includes Phase 6 optimizations!
+
+### **2. SPI Bus Deadlock Prevention** ✅ FIXED (Sept 20, 2025)
 
 **Problem:** SD card and TFT share VSPI bus. Holding TFT lock while reading SD causes system freeze.
 
@@ -355,7 +493,7 @@ tft.startWrite();  // Locks VSPI
 f.read(buffer, size);  // DEADLOCK - SD needs VSPI!
 ```
 
-### **2. FreeRTOS Thread-Safe SD Access**
+### **3. FreeRTOS Thread-Safe SD Access**
 
 **Problem:** Main loop (Core 1) and background task (Core 0) both access SD card.
 
@@ -383,7 +521,7 @@ if (sdTakeMutex("queueScan", 500)) {
 }
 ```
 
-### **3. Stream-Based Queue Removal (Memory Safe)**
+### **4. Stream-Based Queue Removal (Memory Safe)**
 
 **Problem:** Original implementation loaded entire queue into RAM, causing OOM on large queues.
 
@@ -462,10 +600,20 @@ libraries/
 
 ```
 /home/maxepunk/projects/Arduino/
-├── ALNScanner1021_Orchestrator/    # ✅ CURRENT v4.1 (3839 lines)
-│   └── ALNScanner1021_Orchestrator.ino
+├── ALNScanner_v5/                   # 🟢 CURRENT v5.0 (OOP architecture)
+│   ├── ALNScanner_v5.ino           # 16 lines (main entry)
+│   ├── Application.h                # 1,247 lines (orchestrator)
+│   ├── config.h                     # 119 lines (constants)
+│   ├── hal/                         # 5 HAL components
+│   ├── models/                      # 3 data models
+│   ├── services/                    # 4 services
+│   └── ui/                          # 6 UI components
 │
-├── ALNScanner0812Working.backup    # ⚠️ DEPRECATED v3.4 backup
+├── ALNScanner1021_Orchestrator/    # 🔵 ARCHIVED v4.1 (monolithic)
+│   └── ALNScanner1021_Orchestrator.ino  # 3,839 lines
+│
+├── archive/
+│   └── ALNScanner0812Working.backup # 🔴 DEPRECATED v3.4
 │
 ├── libraries/                       # Project-local (8 libraries)
 │   ├── TFT_eSPI/                   # ⚠️ MODIFIED (ST7789 config)
@@ -475,29 +623,38 @@ libraries/
 │   ├── XPT2046_Touchscreen/
 │   └── XPT2046_Bitbang/
 │
-├── test-sketches/                   # 47 diagnostic sketches
+├── test-sketches/                   # 60+ diagnostic sketches
 │   ├── 01-display-hello/
-│   ├── 38-wifi-connect/            # WiFi test (Oct 19)
+│   ├── 38-wifi-connect/            # WiFi test
 │   ├── 39-http-client/             # HTTP client test
 │   ├── 40-json-parse/              # ArduinoJson test
 │   ├── 41-queue-file/              # Queue operations test
-│   ├── 42-background-sync/         # FreeRTOS background task test
-│   └── ... (42 more diagnostic sketches)
-│
-├── archive/                         # ❌ DEPRECATED - DO NOT USE
-│   ├── deprecated-scripts/          # WSL2-specific scripts
-│   ├── deprecated-docs/             # Old documentation
-│   └── deprecated-specs/            # Old spec folders
+│   ├── 42-background-sync/         # FreeRTOS background task
+│   ├── 50-sdcard-hal/              # v5.0: SDCard HAL test
+│   ├── 51-rfid-hal/                # v5.0: RFIDReader HAL test
+│   ├── 52-display-hal/             # v5.0: DisplayDriver HAL test
+│   ├── 53-audio-hal/               # v5.0: AudioDriver HAL test
+│   ├── 54-touch-hal/               # v5.0: TouchDriver HAL test
+│   ├── 55-config-service/          # v5.0: ConfigService test
+│   ├── 56-token-service/           # v5.0: TokenService test
+│   ├── 58-orchestrator-service/    # v5.0: OrchestratorService test
+│   ├── 58-serial-service/          # v5.0: SerialService test
+│   ├── 59-ui-layer/                # v5.0: UI integration test
+│   ├── 60-application/             # v5.0: Full application test
+│   └── ... (45+ more diagnostic sketches)
 │
 ├── .claude/
+│   ├── agents/                      # Subagent orchestration
 │   └── skills/
-│       └── esp32-arduino/          # ESP32 Arduino CLI skill
+│       ├── esp32-arduino/          # ESP32 Arduino CLI skill
+│       └── subagent-orchestration/ # Parallel agent workflows
 │
 ├── CLAUDE.md                        # 📘 This file
+├── REFACTOR_IMPLEMENTATION_GUIDE.md # v5.0 refactor roadmap
 ├── HARDWARE_SPECIFICATIONS.md       # CYD pinout reference
-├── TFT_ESPI_QUICK_REFERENCE.md     # ⚠️ TFT_eSPI config guide (needs update)
+├── TFT_ESPI_QUICK_REFERENCE.md     # TFT_eSPI config guide
 ├── sample_config.txt                # Example SD card config
-└── compile-test.sh                  # Quick compilation test script
+└── baseline_flash.txt               # v4.1 baseline (1,209,987 bytes)
 ```
 
 ---
@@ -717,19 +874,26 @@ Serial.println("[TOKEN-SYNC] ═══ TOKEN DATABASE SYNC END ═══\n");
 1. **Abandoned Modular Approach** (Sept 20, 2025)
    - Attempted: `CYD_Multi_Compatible` with separate modules
    - Reality: ESP32 memory too tight, overhead too high
-   - Decision: Monolithic sketch with functional sections
+   - Decision: Monolithic sketch with functional sections (v4.1)
 
 2. **Migrated WSL2 → Raspberry Pi** (Oct 18, 2025)
    - Eliminated: Windows-Linux USB bridge complexity
    - Gained: Native Arduino CLI, native serial ports
    - Archived: All WSL2-specific scripts and docs
 
-3. **Test-First Development** (Ongoing)
+3. **v5.0 OOP Refactor** (October 22-25, 2025)
+   - Problem: v4.1 monolithic 3,839-line file unmaintainable
+   - Solution: Layered OOP architecture (HAL → Services → UI → Application)
+   - Implementation: 6 parallel subagent agents, 5 phases completed in 3 days
+   - Result: 20 modular files, 99.6% main .ino reduction, same flash usage
+   - **CRITICAL FIX:** VSPI bus initialization order (Display before SD)
+
+4. **Test-First Development** (Ongoing)
    - Pattern: Validated test sketch → Production code
-   - Success: WiFi (test-38), HTTP (test-39), Queue (test-41)
+   - Success: WiFi (test-38), HTTP (test-39), Queue (test-41), HAL (test-50-54), Services (test-55-58), UI (test-59), App (test-60)
    - Result: Fewer integration bugs, faster development
 
-4. **Stream-Based Queue Rebuild** (Phase 6 Fix)
+5. **Stream-Based Queue Rebuild** (v4.1 Phase 6 Fix)
    - Problem: OOM on queue removal (entire queue in RAM)
    - Solution: File streaming with temp file
    - Impact: 100-entry queue from 10KB RAM → 100 bytes RAM
@@ -738,15 +902,21 @@ Serial.println("[TOKEN-SYNC] ═══ TOKEN DATABASE SYNC END ═══\n");
 
 ## 🚀 NEXT DEVELOPMENT PRIORITIES
 
-Based on current 92% flash usage and feature completeness:
+Based on v5.0 status (92% flash, Phase 6 optimization pending):
 
-1. **Flash Optimization** (CRITICAL - approaching 100%)
-   - Remove unused library code
-   - Move string constants to PROGMEM
-   - Consider partition scheme change
+1. **Phase 6: Flash Optimization** (CRITICAL - TARGET <87%)
+   - Current: 1,207,147 bytes (92%)
+   - Target: <1,150,000 bytes (87%)
+   - Required savings: 57,147 bytes
+   - Tactics:
+     - PROGMEM strings (F() macro) - Expected: -20KB
+     - Compile-time DEBUG_MODE flags - Expected: -15KB
+     - Dead code elimination - Expected: -15KB
+     - Inline small functions - Expected: -7KB
+   - **⚠️ MUST NOT regress VSPI initialization order (Display before SD)**
 
 2. **Token Database Expansion**
-   - Current: 50-token limit (array-based)
+   - Current: 50-token limit (std::vector-based)
    - Future: File-based lookup for 100+ tokens
 
 3. **Enhanced Diagnostics**
@@ -758,6 +928,11 @@ Based on current 92% flash usage and feature completeness:
    - Watchdog timer implementation
    - Crash recovery and auto-restart
    - SD card corruption detection
+
+5. **Code Quality Improvements**
+   - Unit tests for service layer (mocked HAL)
+   - Integration tests for UI state machine
+   - Memory leak detection (valgrind-style)
 
 ---
 
@@ -790,9 +965,13 @@ Based on current 92% flash usage and feature completeness:
 
 ---
 
-**Project Version:** v4.1
-**Compilation Status:** ✅ Compiles (1.2MB / 92% flash)
-**Last Verified:** October 21, 2025
-**Git Commit:** TBD (compile test in progress)
+**Project Version:** v5.0 (OOP Architecture)
+**Compilation Status:** ✅ Compiles (1,207,147 bytes / 92% flash)
+**Last Verified:** October 25, 2025
+**Git Branch:** `refactor/v5-oop-architecture`
+**Phase Status:** Phases 0-5 Complete, Phase 6 Optimization Pending
 
-*For detailed implementation history, see git log and test-sketches/ directories.*
+*For detailed implementation history, see:*
+- `REFACTOR_IMPLEMENTATION_GUIDE.md` - v5.0 refactor roadmap
+- `git log` - Commit history
+- `test-sketches/50-60/` - Component test sketches
