@@ -58,6 +58,7 @@ namespace rfid_config {
 namespace queue_config {
     constexpr int MAX_QUEUE_SIZE = 100;
     constexpr int BATCH_UPLOAD_SIZE = 10;
+    constexpr unsigned long MAX_QUEUE_FILE_SIZE = 102400;  // 100KB - corruption detection threshold
     constexpr const char* QUEUE_FILE = "/queue.jsonl";
     constexpr const char* QUEUE_TEMP_FILE = "/queue.tmp";
 }

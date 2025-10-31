@@ -804,6 +804,22 @@ inline bool Application::initializeServices() {
 
     // Initialize orchestrator service (WiFi + connection)
     auto& orchestrator = services::OrchestratorService::getInstance();
+
+    // Initialize queue BEFORE WiFi (validates file, counts entries)
+    LOG_INFO("[INIT] Initializing offline queue...\n");
+    if (!orchestrator.initializeQueue()) {
+        LOG_INFO("[INIT] ⚠ Queue was corrupted and deleted\n");
+        display.getTFT().setTextColor(0xFD20);  // Orange
+        display.getTFT().println("Queue: Reset");
+    } else {
+        int queueSize = orchestrator.getQueueSize();
+        LOG_INFO("[INIT] ✓ Queue ready: %d entries\n", queueSize);
+        if (queueSize > 0) {
+            display.getTFT().setTextColor(0xFD20);  // Orange
+            display.getTFT().printf("Queue: %d pending\n", queueSize);
+        }
+    }
+
     orchestrator.initializeWiFi(config.getConfig());
 
     // Display WiFi status
@@ -1090,6 +1106,118 @@ inline void Application::registerSerialCommands() {
     serial.registerCommand("SHOW_QUEUE", [&orch](const String& args) {
         orch.printQueue();
     }, "Show first 10 queued scans");
+
+    // CLEAR_QUEUE - Delete queue file with confirmation
+    serial.registerCommand("CLEAR_QUEUE", [&orch](const String& args) {
+        Serial.println("\n=== Clear Queue ===");
+        Serial.println("⚠️  WARNING: This will delete ALL queued scans!");
+        Serial.println("Type 'YES' to confirm, or anything else to cancel:");
+
+        // Wait for confirmation (with 10 second timeout)
+        unsigned long startWait = millis();
+        String confirmation = "";
+        while (millis() - startWait < 10000) {
+            if (Serial.available()) {
+                confirmation = Serial.readStringUntil('\n');
+                confirmation.trim();
+                break;
+            }
+            delay(100);
+        }
+
+        if (confirmation == "YES") {
+            int beforeSize = orch.getQueueSize();
+            orch.clearQueue();  // Existing method
+            Serial.printf("✓ Queue cleared (%d entries deleted)\n", beforeSize);
+            Serial.println("Queue file deleted, cache reset to 0\n");
+        } else {
+            Serial.println("✗ Clear cancelled (confirmation not received)\n");
+        }
+    }, "Delete queue file (requires YES confirmation)");
+
+    // QUEUE_STATUS - Enhanced diagnostic information
+    serial.registerCommand("QUEUE_STATUS", [&orch](const String& args) {
+        Serial.println("\n=== Queue Status (Detailed) ===");
+
+        // Cached size (from RAM)
+        int cachedSize = orch.getQueueSize();
+        Serial.printf("Cached size: %d entries (from RAM)\n", cachedSize);
+
+        // File-based information (requires SD access)
+        hal::SDCard::Lock lock("queueStatus", freertos_config::SD_MUTEX_TIMEOUT_MS);
+        if (!lock.acquired()) {
+            Serial.println("✗ Could not acquire SD mutex");
+            Serial.println("=================================\n");
+            return;
+        }
+
+        if (!SD.exists(queue_config::QUEUE_FILE)) {
+            Serial.println("File status: NOT FOUND (empty queue)");
+            Serial.println("=================================\n");
+            return;
+        }
+
+        File file = SD.open(queue_config::QUEUE_FILE, FILE_READ);
+        if (!file) {
+            Serial.println("✗ Could not open queue file");
+            Serial.println("=================================\n");
+            return;
+        }
+
+        // File size
+        unsigned long fileSize = file.size();
+        Serial.printf("File size: %lu bytes", fileSize);
+        if (fileSize > queue_config::MAX_QUEUE_FILE_SIZE) {
+            Serial.print(" ⚠️  CORRUPT (exceeds threshold)");
+        }
+        Serial.println();
+
+        // Count actual lines
+        int actualLines = 0;
+        while (file.available()) {
+            file.readStringUntil('\n');
+            actualLines++;
+        }
+
+        Serial.printf("Actual lines: %d entries (from file)\n", actualLines);
+
+        // Cache vs file divergence check
+        if (cachedSize != actualLines) {
+            Serial.printf("⚠️  WARNING: Cache divergence detected!\n");
+            Serial.printf("   Cached: %d, Actual: %d (difference: %d)\n",
+                         cachedSize, actualLines, actualLines - cachedSize);
+        } else {
+            Serial.println("✓ Cache matches file");
+        }
+
+        // Reopen to show first/last entries
+        file.close();
+        file = SD.open(queue_config::QUEUE_FILE, FILE_READ);
+
+        if (file.available()) {
+            String firstLine = file.readStringUntil('\n');
+            firstLine.trim();
+            Serial.printf("\nFirst entry: %s\n",
+                         firstLine.length() > 80 ? (firstLine.substring(0, 77) + "...").c_str() : firstLine.c_str());
+
+            // Find last line (simple approach - read all)
+            String lastLine = "";
+            while (file.available()) {
+                String line = file.readStringUntil('\n');
+                line.trim();
+                if (line.length() > 0) {
+                    lastLine = line;
+                }
+            }
+            if (lastLine.length() > 0) {
+                Serial.printf("Last entry: %s\n",
+                             lastLine.length() > 80 ? (lastLine.substring(0, 77) + "...").c_str() : lastLine.c_str());
+            }
+        }
+
+        file.close();
+        Serial.println("=================================\n");
+    }, "Show detailed queue diagnostics (file size, line count, cache status)");
 
     // FORCE_OVERFLOW - Test FIFO overflow protection
     serial.registerCommand("FORCE_OVERFLOW", [&orch, &config](const String& args) {

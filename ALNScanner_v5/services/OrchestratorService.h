@@ -335,6 +335,81 @@ public:
         return (resp.code == 200);
     }
 
+    /**
+     * @brief Initialize queue size from disk file (call after SD ready)
+     * @return true if queue valid, false if corrupted and deleted
+     *
+     * Validates queue file, counts entries, sets cached size.
+     * If file size > 100KB, deletes as corrupted and resets to 0.
+     *
+     * MUST be called from Application::setup() after SD card initialized.
+     * Designed to catch power-loss corruption (e.g., 1.7GB file from incomplete writes).
+     */
+    bool initializeQueue() {
+        LOG_INFO("\n[ORCH-QUEUE-INIT] ═══ QUEUE INITIALIZATION START ═══\n");
+
+        hal::SDCard::Lock lock("initQueue", freertos_config::SD_MUTEX_TIMEOUT_MS);
+        if (!lock.acquired()) {
+            LOG_ERROR("ORCH-QUEUE-INIT", "Failed to acquire SD mutex");
+            return false;
+        }
+
+        // Check if queue file exists
+        if (!SD.exists(queue_config::QUEUE_FILE)) {
+            LOG_INFO("[ORCH-QUEUE-INIT] No queue file, starting fresh\n");
+            portENTER_CRITICAL(&_queue.mutex);
+            _queue.size = 0;
+            portEXIT_CRITICAL(&_queue.mutex);
+            LOG_INFO("[ORCH-QUEUE-INIT] ═══ QUEUE INITIALIZATION END ═══\n\n");
+            return true;
+        }
+
+        File file = SD.open(queue_config::QUEUE_FILE, FILE_READ);
+        if (!file) {
+            LOG_ERROR("ORCH-QUEUE-INIT", "Could not open queue file");
+            return false;
+        }
+
+        // CORRUPTION CHECK: File size validation
+        unsigned long fileSize = file.size();
+        LOG_INFO("[ORCH-QUEUE-INIT] Queue file size: %lu bytes\n", fileSize);
+
+        if (fileSize > queue_config::MAX_QUEUE_FILE_SIZE) {
+            LOG_ERROR("ORCH-QUEUE-INIT", "CORRUPTION DETECTED");
+            LOG_INFO("[ORCH-QUEUE-INIT] File size %lu exceeds threshold %lu\n",
+                     fileSize, queue_config::MAX_QUEUE_FILE_SIZE);
+            LOG_INFO("[ORCH-QUEUE-INIT] Deleting corrupted queue file\n");
+
+            file.close();
+            SD.remove(queue_config::QUEUE_FILE);
+
+            portENTER_CRITICAL(&_queue.mutex);
+            _queue.size = 0;
+            portEXIT_CRITICAL(&_queue.mutex);
+
+            LOG_INFO("[ORCH-QUEUE-INIT] ✓ Corrupted queue deleted, reset to 0\n");
+            LOG_INFO("[ORCH-QUEUE-INIT] ═══ QUEUE INITIALIZATION END ═══\n\n");
+            return false;  // Indicate corruption was found and handled
+        }
+
+        // Count actual entries (newlines)
+        int lineCount = 0;
+        while (file.available()) {
+            file.readStringUntil('\n');
+            lineCount++;
+        }
+        file.close();
+
+        // Update cached size with actual count
+        portENTER_CRITICAL(&_queue.mutex);
+        _queue.size = lineCount;
+        portEXIT_CRITICAL(&_queue.mutex);
+
+        LOG_INFO("[ORCH-QUEUE-INIT] ✓ Queue validated: %d entries\n", lineCount);
+        LOG_INFO("[ORCH-QUEUE-INIT] ═══ QUEUE INITIALIZATION END ═══\n\n");
+        return true;
+    }
+
     // ─── Queue Operations ──────────────────────────────────────────────
 
     /**
