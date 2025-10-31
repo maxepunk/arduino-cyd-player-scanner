@@ -26,7 +26,7 @@ struct DeviceConfig {
     DeviceConfig() = default;
 
     // Validation methods
-    bool validate() const {
+    bool validate() {
         // Check required fields
         if (wifiSSID.length() == 0 || wifiSSID.length() > limits::MAX_SSID_LENGTH) {
             return false;
@@ -40,8 +40,15 @@ struct DeviceConfig {
             return false;
         }
 
-        if (!orchestratorURL.startsWith("http://")) {
+        // Accept both http:// and https:// protocols
+        if (!orchestratorURL.startsWith("http://") && !orchestratorURL.startsWith("https://")) {
             return false;
+        }
+
+        // Auto-upgrade http:// to https:// (backward compatibility)
+        if (orchestratorURL.startsWith("http://")) {
+            orchestratorURL.replace("http://", "https://");
+            Serial.println("[CONFIG] Auto-upgraded URL: http:// -> https://");
         }
 
         if (teamID.length() != limits::TEAM_ID_LENGTH) {

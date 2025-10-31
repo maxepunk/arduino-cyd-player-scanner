@@ -124,10 +124,10 @@ ALNScanner1021_Orchestrator/
 ```bash
 cd /home/maxepunk/projects/Arduino/ALNScanner_v5
 
-arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=default,UploadSpeed=921600 .
+arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=no_ota,UploadSpeed=921600 .
 ```
 
-**Expected Output:** `Sketch uses 1207147 bytes (92%) of program storage space`
+**Expected Output:** `Sketch uses 1257147 bytes (61%) of program storage space` (with HTTPS support)
 
 ### **Upload to Device**
 
@@ -349,8 +349,9 @@ struct QueueEntry {
 
 **Display:** ST7789, 240x320, Dual USB (Micro + Type-C)
 **MCU:** ESP32-WROOM-32 (240MHz dual-core, 4MB flash, 520KB RAM)
-**Flash Usage:** 92% (1.2MB / 1.3MB) - **TIGHT!**
+**Flash Usage:** ~63% (1.26MB / 2MB with no_ota partition) - Comfortable
 **RAM Usage:** 15% (52KB / 328KB) - Comfortable
+**Partition Scheme:** `no_ota` (2MB app space, no OTA updates - requires USB for firmware updates)
 
 ### **Pin Assignments (DO NOT CHANGE - HARDWARE DEPENDENT)**
 

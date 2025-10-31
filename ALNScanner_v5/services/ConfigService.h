@@ -306,7 +306,7 @@ public:
      * - SYNC_TOKENS: always valid (boolean)
      * - DEBUG_MODE: always valid (boolean)
      */
-    inline bool validate() const {
+    inline bool validate() {
         LOG_INFO("\n[VALIDATE] === CONFIG VALIDATION START ===\n");
         bool isValid = true;
 
@@ -329,17 +329,22 @@ public:
             LOG_DEBUG("[VALIDATE] + WIFI_PASSWORD valid\n");
         }
 
-        // Validate ORCHESTRATOR_URL (required, starts with http://, 10-200 characters)
+        // Validate ORCHESTRATOR_URL (required, starts with http:// or https://, 10-200 characters)
         if (_config.orchestratorURL.length() == 0) {
             LOG_INFO("[VALIDATE] X ORCHESTRATOR_URL is required\n");
             isValid = false;
-        } else if (!_config.orchestratorURL.startsWith("http://")) {
-            LOG_INFO("[VALIDATE] X ORCHESTRATOR_URL must start with http://\n");
+        } else if (!_config.orchestratorURL.startsWith("http://") && !_config.orchestratorURL.startsWith("https://")) {
+            LOG_INFO("[VALIDATE] X ORCHESTRATOR_URL must start with http:// or https://\n");
             isValid = false;
         } else if (_config.orchestratorURL.length() < 10 || _config.orchestratorURL.length() > 200) {
             LOG_INFO("[VALIDATE] X ORCHESTRATOR_URL invalid length (10-200 characters)\n");
             isValid = false;
         } else {
+            // Auto-upgrade http:// to https:// for backward compatibility
+            if (_config.orchestratorURL.startsWith("http://")) {
+                _config.orchestratorURL.replace("http://", "https://");
+                LOG_INFO("[VALIDATE] Auto-upgraded URL: http:// -> https://\n");
+            }
             LOG_DEBUG("[VALIDATE] + ORCHESTRATOR_URL valid: %s\n", _config.orchestratorURL.c_str());
         }
 

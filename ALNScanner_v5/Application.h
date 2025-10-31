@@ -822,7 +822,7 @@ inline bool Application::initializeServices() {
         LOG_INFO("[INIT] Syncing tokens from orchestrator...\n");
         display.getTFT().println("Syncing tokens...");
 
-        if (tokens.syncFromOrchestrator(config.getConfig().orchestratorURL)) {
+        if (tokens.syncFromOrchestrator(config.getConfig().orchestratorURL, orchestrator)) {
             LOG_INFO("[INIT] ✓ Token sync successful\n");
             display.getTFT().setTextColor(0x07E0);  // Green
             display.getTFT().println("Tokens: Synced");

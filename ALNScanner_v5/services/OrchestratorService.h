@@ -192,9 +192,11 @@ public:
         LOG_INFO("[ORCH-SEND] Payload: %s\n", requestBody.c_str());
         LOG_INFO("[ORCH-SEND] Payload size: %d bytes\n", requestBody.length());
 
-        // Send via consolidated HTTP helper (PRIMARY FLASH SAVINGS)
+        // Send via consolidated HTTP helper with retry logic
         String url = config.orchestratorURL + "/api/scan";
-        auto resp = _http.httpPOST(url, requestBody);
+        auto resp = httpWithRetry([&]() {
+            return _http.httpPOST(url, requestBody, 10000);
+        }, "scan submission");
 
         unsigned long latencyMs = millis() - startMs;
         LOG_INFO("[ORCH-SEND] HTTP response code: %d\n", resp.code);
@@ -326,7 +328,9 @@ public:
         if (config.orchestratorURL.length() == 0) return false;
 
         String url = config.orchestratorURL + "/health?deviceId=" + config.deviceID;
-        auto resp = _http.httpGET(url);
+        auto resp = httpWithRetry([&]() {
+            return _http.httpGET(url, 5000);
+        }, "health check");
 
         return (resp.code == 200);
     }
@@ -387,10 +391,12 @@ public:
 
         LOG_INFO("[ORCH-BATCH] Request body size: %d bytes\n", requestBody.length());
 
-        // Send via consolidated HTTP helper (PRIMARY FLASH SAVINGS)
+        // Send via consolidated HTTP helper with retry logic
         String url = config.orchestratorURL + "/api/scan/batch";
         unsigned long startTime = millis();
-        auto resp = _http.httpPOST(url, requestBody);
+        auto resp = httpWithRetry([&]() {
+            return _http.httpPOST(url, requestBody, 30000);
+        }, "batch upload");
         unsigned long latency = millis() - startTime;
 
         if (resp.body.length() > 0 && resp.body.length() < 200) {
@@ -484,6 +490,39 @@ public:
 
         file.close();
         LOG_INFO("[ORCH-QUEUE] ═══ End Queue ═══\n\n");
+    }
+
+    // ─── Public HTTP Methods (for use by other services) ──────────────────
+
+    /**
+     * @brief Execute HTTP GET request with retry logic
+     * @param url Full URL to GET
+     * @param timeoutMs Request timeout in milliseconds
+     * @param operation Description for logging
+     * @return HTTP response code (-1 on failure)
+     */
+    int httpGETWithRetry(const String& url, uint32_t timeoutMs, const char* operation, String& responseBody) {
+        auto resp = httpWithRetry([&]() {
+            return _http.httpGET(url, timeoutMs);
+        }, operation);
+        responseBody = resp.body;
+        return resp.code;
+    }
+
+    /**
+     * @brief Execute HTTP POST request with retry logic
+     * @param url Full URL to POST
+     * @param json JSON payload
+     * @param timeoutMs Request timeout in milliseconds
+     * @param operation Description for logging
+     * @return HTTP response code (-1 on failure)
+     */
+    int httpPOSTWithRetry(const String& url, const String& json, uint32_t timeoutMs, const char* operation, String& responseBody) {
+        auto resp = httpWithRetry([&]() {
+            return _http.httpPOST(url, json, timeoutMs);
+        }, operation);
+        responseBody = resp.body;
+        return resp.code;
     }
 
 private:
@@ -615,6 +654,60 @@ private:
     };
 
     HTTPHelper _http;  // Singleton HTTP helper instance
+
+    /**
+     * @brief HTTP request with exponential backoff retry
+     * @param requestFn Function that returns HTTPHelper::Response
+     * @param operation Description for logging (e.g., "scan submission")
+     * @return Final response after retries
+     *
+     * Retry schedule: 1s, 2s, 4s, 8s, 16s, 30s (max)
+     * Total max wait: ~61 seconds over 6 attempts
+     *
+     * Does NOT retry on:
+     * - 2xx success (return immediately)
+     * - 404 Not Found (semantic error)
+     * - 409 Conflict (semantic error)
+     *
+     * Retries on:
+     * - Connection failures (code < 0)
+     * - 5xx server errors
+     * - Timeouts
+     */
+    template<typename RequestFunc>
+    HTTPHelper::Response httpWithRetry(RequestFunc requestFn, const char* operation) {
+        const int MAX_ATTEMPTS = 6;
+        const int BACKOFF_DELAYS[] = {1000, 2000, 4000, 8000, 16000, 30000};
+
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            HTTPHelper::Response resp = requestFn();
+
+            // Success or semantic error (don't retry)
+            if (resp.success || resp.code == 404 || resp.code == 409) {
+                if (attempt > 1) {
+                    LOG_INFO("[ORCH-RETRY] %s succeeded on attempt %d\n", operation, attempt);
+                }
+                return resp;
+            }
+
+            // Connection failure or server error
+            LOG_INFO("[ORCH-RETRY] %s failed (attempt %d/%d), code: %d\n",
+                     operation, attempt, MAX_ATTEMPTS, resp.code);
+
+            if (attempt < MAX_ATTEMPTS) {
+                int delayMs = BACKOFF_DELAYS[attempt - 1];
+                LOG_INFO("[ORCH-RETRY] Retrying in %d ms...\n", delayMs);
+                delay(delayMs);
+            }
+        }
+
+        // All retries exhausted
+        LOG_INFO("[ORCH-RETRY] %s failed after %d attempts, marking offline\n", operation, MAX_ATTEMPTS);
+        HTTPHelper::Response failed;
+        failed.code = -1;
+        failed.success = false;
+        return failed;
+    }
 
     // ─── Queue File Operations ─────────────────────────────────────────
 
