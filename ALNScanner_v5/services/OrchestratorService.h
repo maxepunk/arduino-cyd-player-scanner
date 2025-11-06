@@ -183,6 +183,7 @@ public:
         doc["tokenId"] = scan.tokenId;
         if (scan.teamId.length() > 0) doc["teamId"] = scan.teamId;
         doc["deviceId"] = scan.deviceId;
+        doc["deviceType"] = scan.deviceType;  // P2.3: Required by backend validators
         doc["timestamp"] = scan.timestamp;
 
         String requestBody;
@@ -255,6 +256,7 @@ public:
         doc["tokenId"] = scan.tokenId;
         if (scan.teamId.length() > 0) doc["teamId"] = scan.teamId;
         doc["deviceId"] = scan.deviceId;
+        doc["deviceType"] = scan.deviceType;  // P2.3: Required by backend validators
         doc["timestamp"] = scan.timestamp;
 
         String jsonLine;
@@ -458,6 +460,7 @@ public:
             transaction["tokenId"] = entry.tokenId;
             if (entry.teamId.length() > 0) transaction["teamId"] = entry.teamId;
             transaction["deviceId"] = entry.deviceId;
+            transaction["deviceType"] = entry.deviceType;  // P2.3: Required by backend validators
             transaction["timestamp"] = entry.timestamp;
         }
 
@@ -816,7 +819,7 @@ private:
             DeserializationError error = deserializeJson(doc, line);
 
             if (error == DeserializationError::Ok) {
-                // Validate required fields
+                // Validate required fields (P2.3: deviceType now required)
                 if (doc.containsKey("tokenId") && doc.containsKey("deviceId") &&
                     doc.containsKey("timestamp")) {
 
@@ -824,6 +827,8 @@ private:
                     scan.tokenId = doc["tokenId"].as<String>();
                     scan.teamId = doc.containsKey("teamId") ? doc["teamId"].as<String>() : "";
                     scan.deviceId = doc["deviceId"].as<String>();
+                    // P2.3: Read deviceType from queue (defaults to "esp32" if missing for backwards compat)
+                    scan.deviceType = doc.containsKey("deviceType") ? doc["deviceType"].as<String>() : "esp32";
                     scan.timestamp = doc["timestamp"].as<String>();
 
                     batch.push_back(scan);

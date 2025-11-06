@@ -263,6 +263,8 @@ Services (4):          UI (6):              HAL (5):
 │    ┌─────────────────────────────────────────────────────┐ │
 │    │ IF WiFi + Orchestrator Connected:                   │ │
 │    │   └─► POST /api/scan (immediate send)               │ │
+│    │       Payload: {tokenId, teamId?, deviceId,          │ │
+│    │                 deviceType: "esp32", timestamp}      │ │
 │    │       ├─► 2xx Success → Display token               │ │
 │    │       ├─► 409 Conflict → Display (duplicate OK)     │ │
 │    │       └─► Other → Queue for retry                   │ │
@@ -337,6 +339,7 @@ struct QueueEntry {
   String tokenId;    // Required
   String teamId;     // Optional
   String deviceId;   // Required
+  String deviceType; // Required (P2.3: "esp32" for hardware scanners)
   String timestamp;  // Required (ISO 8601-ish format)
 };
 ```
