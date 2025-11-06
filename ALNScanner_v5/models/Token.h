@@ -58,17 +58,19 @@ struct ScanData {
     String tokenId;     // Required
     String teamId;      // Optional
     String deviceId;    // Required
+    String deviceType;  // Required (P2.3: "esp32" for hardware scanners)
     String timestamp;   // Required (ISO 8601-ish format)
 
-    ScanData() = default;
+    ScanData() : deviceType("esp32") {}  // P2.3: Default to "esp32" for hardware scanners
 
     ScanData(const String& token, const String& team, const String& device, const String& ts)
-        : tokenId(token), teamId(team), deviceId(device), timestamp(ts) {}
+        : tokenId(token), teamId(team), deviceId(device), deviceType("esp32"), timestamp(ts) {}
 
     // Validate required fields
     bool isValid() const {
         return (tokenId.length() > 0 &&
                 deviceId.length() > 0 &&
+                deviceType.length() > 0 &&
                 timestamp.length() > 0);
     }
 
@@ -78,6 +80,7 @@ struct ScanData {
         Serial.printf("Token ID: %s\n", tokenId.c_str());
         Serial.printf("Team ID: %s\n", teamId.length() > 0 ? teamId.c_str() : "(none)");
         Serial.printf("Device ID: %s\n", deviceId.c_str());
+        Serial.printf("Device Type: %s\n", deviceType.c_str());  // P2.3
         Serial.printf("Timestamp: %s\n", timestamp.c_str());
         Serial.println("-----------------\n");
     }
