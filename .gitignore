@@ -28,3 +28,9 @@ Thumbs.db
 
 # Temporary files
 *.tmp
+
+# SD card runtime files (device-specific)
+sd-card-deploy/config.txt
+sd-card-deploy/device_id.txt
+sd-card-deploy/queue.jsonl
+sd-card-deploy/tokens.json
