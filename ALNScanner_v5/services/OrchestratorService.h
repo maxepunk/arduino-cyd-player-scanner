@@ -451,8 +451,13 @@ public:
 
         LOG_INFO("[ORCH-BATCH] Uploading batch of %zu entries\n", batch.size());
 
+        // Generate batch ID for idempotency (stable across HTTP retries)
+        String batchId = config.deviceID + "_" + String(_nextBatchId);
+        LOG_INFO("[ORCH-BATCH] Batch ID: %s\n", batchId.c_str());
+
         // Build batch request JSON
         JsonDocument doc;
+        doc["batchId"] = batchId;
         JsonArray transactions = doc["transactions"].to<JsonArray>();
 
         for (const models::ScanData& entry : batch) {
@@ -488,6 +493,9 @@ public:
 
             // Remove uploaded entries from queue (stream-based)
             removeUploadedEntries(batch.size());
+
+            // Increment batch ID for next batch
+            _nextBatchId++;
 
             // Check if more entries remain
             int remainingSize = getQueueSize();
@@ -628,6 +636,9 @@ private:
     // Device config (for background task - includes orchestratorURL and deviceID)
     models::DeviceConfig _config;
 
+    // Batch ID counter for idempotency (increments only on successful upload)
+    uint32_t _nextBatchId = 0;
+
     // ─── HTTP Helper Class (CRITICAL FLASH SAVINGS) ───────────────────
 
     /**
@@ -651,11 +662,6 @@ private:
      */
     class HTTPHelper {
     public:
-        HTTPHelper() {
-            // Configure secure client to skip certificate validation
-            // This is acceptable for local network orchestrator deployments
-            _secureClient.setInsecure();
-        }
         struct Response {
             int code;           // HTTP response code (or negative for errors)
             String body;        // Response body (if available)
@@ -667,10 +673,23 @@ private:
          * @param url Full URL to GET
          * @param timeoutMs Request timeout in milliseconds
          * @return Response struct with code, body, success
+         *
+         * CRITICAL FIX: Creates WiFiClientSecure locally per request to avoid
+         * heap corruption from reusing SSL context across failed connections.
+         * See: ESP32 GitHub issues #3808, #6257, #9636
          */
         Response httpGET(const String& url, uint32_t timeoutMs = 5000) {
             HTTPClient client;
-            configureClient(client, url, timeoutMs);
+            WiFiClientSecure secureClient;  // Declare at function scope (CRITICAL!)
+
+            // Create WiFiClientSecure locally (fresh SSL context each request)
+            if (url.startsWith("https://")) {
+                secureClient.setInsecure();  // Skip certificate validation
+                client.begin(secureClient, url);
+            } else {
+                client.begin(url);
+            }
+            client.setTimeout(timeoutMs);
 
             int code = client.GET();
             Response resp;
@@ -688,10 +707,23 @@ private:
          * @param json JSON string payload
          * @param timeoutMs Request timeout in milliseconds
          * @return Response struct with code, body, success
+         *
+         * CRITICAL FIX: Creates WiFiClientSecure locally per request to avoid
+         * heap corruption from reusing SSL context across failed connections.
+         * See: ESP32 GitHub issues #3808, #6257, #9636
          */
         Response httpPOST(const String& url, const String& json, uint32_t timeoutMs = 5000) {
             HTTPClient client;
-            configureClient(client, url, timeoutMs);
+            WiFiClientSecure secureClient;  // Declare at function scope (CRITICAL!)
+
+            // Create WiFiClientSecure locally (fresh SSL context each request)
+            if (url.startsWith("https://")) {
+                secureClient.setInsecure();  // Skip certificate validation
+                client.begin(secureClient, url);
+            } else {
+                client.begin(url);
+            }
+            client.setTimeout(timeoutMs);
             client.addHeader("Content-Type", "application/json");
 
             int code = client.POST(json);
@@ -703,32 +735,6 @@ private:
             client.end();
             return resp;
         }
-
-    private:
-        /**
-         * @brief Configure HTTP client with HTTPS support
-         * @param client HTTPClient reference to configure
-         * @param url Full URL to connect to (http:// or https://)
-         * @param timeoutMs Request timeout in milliseconds
-         *
-         * This method contains the shared HTTP client setup code that was
-         * previously duplicated across 4 functions. Consolidating here
-         * eliminates ~15KB of duplicate code in flash.
-         *
-         * For HTTPS URLs, uses WiFiClientSecure with certificate validation disabled.
-         * This is acceptable for local network deployments where the orchestrator
-         * is on the same network and not exposed to the internet.
-         */
-        void configureClient(HTTPClient& client, const String& url, uint32_t timeoutMs) {
-            if (url.startsWith("https://")) {
-                client.begin(_secureClient, url);
-            } else {
-                client.begin(url);
-            }
-            client.setTimeout(timeoutMs);
-        }
-
-        WiFiClientSecure _secureClient;  // Secure client for HTTPS requests
     };
 
     HTTPHelper _http;  // Singleton HTTP helper instance
@@ -1105,30 +1111,38 @@ private:
  *    - Consolidating into HTTPHelper eliminates ~15KB flash (3 duplicate copies)
  *    - This is the SINGLE BIGGEST flash optimization in v5.0 refactor
  *
- * 2. THREAD-SAFE QUEUE OPERATIONS
+ * 2. WIFI CLIENT SECURE FIX (HEAP CORRUPTION PREVENTION)
+ *    - CRITICAL: WiFiClientSecure created LOCALLY per request (not member variable)
+ *    - Prevents heap corruption from reusing SSL context across failed connections
+ *    - Known ESP32 library bugs: GitHub issues #3808, #6257, #9636
+ *    - Each failed HTTPS connection leaks ~4KB if WiFiClientSecure is reused
+ *    - Local instance ensures clean SSL state for each request
+ *    - Auto-cleanup on scope exit prevents buffer overflow into heap metadata
+ *
+ * 3. THREAD-SAFE QUEUE OPERATIONS
  *    - Queue size cache uses portENTER_CRITICAL/EXIT_CRITICAL (spinlock)
  *    - SD card operations use hal::SDCard::Lock (RAII mutex)
  *    - Background task (Core 0) and main loop (Core 1) both access queue
  *    - Stream-based queue removal prevents RAM spikes (100-entry queue: 100 bytes vs 10KB)
  *
- * 3. WIFI EVENT-DRIVEN STATE MANAGEMENT
+ * 4. WIFI EVENT-DRIVEN STATE MANAGEMENT
  *    - WiFi events update connection state automatically
  *    - Background task checks orchestrator health every 10 seconds
  *    - State transitions: DISCONNECTED → WIFI_CONNECTED → CONNECTED
  *    - Auto-reconnect handled by WiFi library, no manual intervention needed
  *
- * 4. QUEUE OVERFLOW PROTECTION
+ * 5. QUEUE OVERFLOW PROTECTION
  *    - MAX_QUEUE_SIZE (100 entries) enforced before queueScan()
  *    - FIFO removal of oldest entry when full
  *    - Prevents SD card filling up with stale scans
  *
- * 5. BACKGROUND TASK STACK MONITORING
+ * 6. BACKGROUND TASK STACK MONITORING
  *    - 16KB stack size (BACKGROUND_TASK_STACK_SIZE)
  *    - Stack high water mark checked every cycle
  *    - Warning if < 512 bytes free
  *    - vTaskDelay() prevents watchdog timeout
  *
- * 6. EXTRACTED FROM v4.1 LINES
+ * 7. EXTRACTED FROM v4.1 LINES
  *    - WiFi initialization: Lines 2390-2444
  *    - WiFi event handlers: Lines 2366-2388
  *    - Send scan: Lines 1650-1716
