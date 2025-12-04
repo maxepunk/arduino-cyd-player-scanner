@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 🎯 PROJECT STATUS: v5.0 OOP REFACTOR COMPLETE
 
-**Last Updated:** October 25, 2025
+**Last Updated:** December 4, 2025
 **Platform:** Raspberry Pi 5 (Debian 12 Bookworm, Native Linux Arduino CLI)
 **Current Version:** v5.0 (OOP Architecture - Phases 0-5 Complete, Phase 6 Optimization Pending)
 **Hardware:** CYD 2.8" ESP32-2432S028R (ST7789 Dual USB Variant)
@@ -55,8 +55,8 @@ ALNScanner_v5/
 - **Core RFID Scanning:** MFRC522 on software SPI, NDEF text extraction, 7-byte UID support
 - **WiFi Connectivity:** Auto-reconnect, event-driven state management
 - **HTTP Orchestrator Integration:**
-  - POST `/api/scan` - Real-time scan submission
-  - POST `/api/scan/batch` - Queue batch upload (up to 10 entries)
+  - POST `/api/scan` - Real-time scan submission (includes `deviceType: 'esp32'`)
+  - POST `/api/scan/batch` - Queue batch upload (up to 10 entries, idempotent)
   - GET `/health` - Connection health check
   - GET `/api/tokens` - Token database synchronization
 - **Offline Queue System:**
@@ -777,6 +777,12 @@ SD:/
 - **No special suffixes** - video tokens and regular tokens use identical file paths
 - **Distinction is in metadata:** `video` field in tokens.json determines behavior
 
+**NeurAI Display BMP Generation:**
+- Auto-generated from Notion description text via `sync_notion_to_tokens.py`
+- Format: 240x320 BMP with red branding, ASCII logo, token display text
+- Generated for tokens with display text in Notion (everything before first SF_ field)
+- Stored in `images/` directory alongside hand-crafted artwork
+
 **Example:**
 - `kaa001.bmp` with `video: ""` → Regular token (persistent display + audio)
 - `jaw001.bmp` with `video: "jaw001.mp4"` → Video token (2.5s modal + "Sending..." overlay)
@@ -817,6 +823,12 @@ arduino-cli lib install ArduinoJson
 - Check orchestrator health: `curl http://ORCHESTRATOR_URL/health`
 - Manually trigger upload: `FORCE_UPLOAD` command
 - Check Core 0 task is running: Look for `[BG-TASK]` log messages
+
+**WiFiClientSecure heap corruption / HTTPS failures:**
+- Fixed in commit b58961e (Nov 2025)
+- Root cause: Reusing WiFiClientSecure objects across connections
+- Solution: Create fresh WiFiClientSecure for each HTTPS request
+- Batch uploads now use idempotent POST (safe to retry on failure)
 
 **Display shows black screen:**
 - Wrong TFT_eSPI configuration (see TFT_ESPI_QUICK_REFERENCE.md)
