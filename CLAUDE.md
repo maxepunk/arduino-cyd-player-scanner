@@ -1,12 +1,16 @@
 # CLAUDE.md
 
+Last verified: 2025-12-08
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+For cross-cutting concerns (scoring logic, operation modes, game modes, token schema), see @../CLAUDE.md.
 
 ---
 
 ## 🎯 PROJECT STATUS: v5.0 OOP REFACTOR COMPLETE
 
-**Last Updated:** December 4, 2025
+**Last Code Update:** December 4, 2025
 **Platform:** Raspberry Pi 5 (Debian 12 Bookworm, Native Linux Arduino CLI)
 **Current Version:** v5.0 (OOP Architecture - Phases 0-5 Complete, Phase 6 Optimization Pending)
 **Hardware:** CYD 2.8" ESP32-2432S028R (ST7789 Dual USB Variant)
