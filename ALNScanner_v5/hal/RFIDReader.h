@@ -689,7 +689,8 @@ String RFIDReader::extractNDEFTextInternal() {
             LOG_DEBUG("[NDEF] Record header: 0x%02X\n", recordHeader);
 
             // Check if it's a well-known text record
-            if ((recordHeader & 0xF0) == 0xD0) {  // MB=1, ME=1, SR=1, TNF=001 (Well-known)
+            // TNF=001 (Well-known type) - supports multi-record NDEF messages (dual-record tags)
+            if ((recordHeader & 0x07) == 0x01) {
                 uint8_t typeLength = ndefMessage[1];
                 uint8_t payloadLength = ndefMessage[2];
 
@@ -765,7 +766,7 @@ bool RFIDReader::begin() {
     LOG_INFO("[RFID-HAL] PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP\n");
     LOG_INFO("[RFID-HAL]   INITIALIZING RFID READER\n");
     LOG_INFO("[RFID-HAL] PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP\n");
-    LOG_INFO("[RFID-HAL]    WARNING: Serial RX will be disabled!\n");
+    LOG_INFO("[RFID-HAL] ï¿½  WARNING: Serial RX will be disabled!\n");
     Serial.flush(); // Force send warning before breaking serial
     delay(100);
 
@@ -773,7 +774,7 @@ bool RFIDReader::begin() {
     pinMode(pins::RFID_SCK, OUTPUT);
     pinMode(pins::RFID_MOSI, OUTPUT);
     pinMode(pins::RFID_MISO, INPUT);
-    pinMode(pins::RFID_SS, OUTPUT);  //   THIS LINE KILLS SERIAL RX (GPIO 3)
+    pinMode(pins::RFID_SS, OUTPUT);  // ï¿½ THIS LINE KILLS SERIAL RX (GPIO 3)
     digitalWrite(pins::RFID_SS, HIGH);
     digitalWrite(pins::RFID_SCK, LOW);
 
