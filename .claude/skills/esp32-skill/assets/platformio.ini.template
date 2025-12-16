@@ -1,0 +1,170 @@
+; PlatformIO Configuration Template for ESP32 with Native Testing
+; 
+; This template provides two build environments:
+; 1. esp32dev - Builds and uploads to ESP32 hardware
+; 2. native   - Runs unit tests on your development machine (no hardware needed)
+;
+; Usage:
+;   pio test -e native        # Run native tests
+;   pio run                   # Build for ESP32
+;   pio run -t upload         # Upload to ESP32
+;   pio device monitor        # Serial monitor
+
+[platformio]
+; Default environment for 'pio run' without -e flag
+default_envs = esp32dev
+
+; Shared source directory
+src_dir = src
+
+; ============================================================================
+; ESP32 Hardware Build Environment
+; ============================================================================
+[env:esp32dev]
+platform = espressif32
+board = esp32dev
+framework = arduino
+monitor_speed = 115200
+
+; Upload settings (uncomment and modify as needed)
+; upload_port = /dev/ttyUSB0
+; upload_speed = 921600
+
+; Build flags for hardware build
+build_flags = 
+    -DPRODUCTION_BUILD
+    ; -DDEBUG_MODE          ; Uncomment for debug output
+    ; -DCORE_DEBUG_LEVEL=3  ; ESP32 core debug level (0-5)
+
+; Library dependencies
+lib_deps = 
+    ; Add your libraries here, e.g.:
+    ; miguelbalboa/MFRC522
+    ; adafruit/Adafruit GFX Library
+    ; bodmer/TFT_eSPI
+
+; Extra library search paths
+lib_extra_dirs = 
+    lib
+
+; ============================================================================
+; Native Testing Environment (No Hardware Required!)
+; ============================================================================
+[env:native]
+platform = native
+
+; Build flags for native test environment
+build_flags = 
+    -std=c++11
+    -DUNIT_TEST
+    -DNATIVE_BUILD
+    -g                      ; Debug symbols for better error messages
+
+; Test framework
+test_framework = unity
+
+; Where to find test files
+test_dir = test/native
+
+; Extra include paths for tests
+build_src_filter =
+    +<*>
+    -<main.cpp>             ; Exclude main.cpp (has setup()/loop())
+
+; Libraries available during testing
+lib_deps = 
+    ; Test-specific libraries if needed
+
+; ============================================================================
+; Optional: Embedded Test Environment (runs on hardware)
+; ============================================================================
+; [env:esp32dev_test]
+; platform = espressif32
+; board = esp32dev
+; framework = arduino
+; test_framework = unity
+; test_dir = test/embedded
+; build_flags = 
+;     -DUNIT_TEST
+;     -DEMBEDDED_TEST
+
+; ============================================================================
+; CYD Board (ESP32-2432S028R) - Uncomment if using CYD
+; ============================================================================
+; [env:cyd]
+; platform = espressif32
+; board = esp32dev
+; framework = arduino
+; monitor_speed = 115200
+; build_flags = 
+;     -DUSER_SETUP_LOADED=1
+;     -DST7789_DRIVER=1
+;     -DTFT_WIDTH=240
+;     -DTFT_HEIGHT=320
+;     -DTFT_MISO=12
+;     -DTFT_MOSI=13
+;     -DTFT_SCLK=14
+;     -DTFT_CS=15
+;     -DTFT_DC=2
+;     -DTFT_RST=-1
+;     -DTOUCH_CS=33
+;     -DSPI_FREQUENCY=40000000
+; lib_deps = 
+;     bodmer/TFT_eSPI
+
+; ============================================================================
+; Common settings shared across environments
+; ============================================================================
+[env]
+; Uncomment for verbose build output
+; build_flags = -v
+
+; Check for warnings as errors (recommended)
+; build_flags = -Werror
+
+; ============================================================================
+; Tips:
+; ============================================================================
+; 
+; 1. Running tests:
+;    pio test -e native              # Run all native tests
+;    pio test -e native -f test_scanner  # Run specific test file
+;    pio test -e native -v           # Verbose output
+;
+; 2. Building:
+;    pio run                         # Build default environment
+;    pio run -e native               # Build native (for testing)
+;    pio run --target clean          # Clean build files
+;
+; 3. Uploading:
+;    pio run -t upload               # Build and upload
+;    pio run -t upload -e cyd        # Upload to specific environment
+;
+; 4. Monitoring:
+;    pio device monitor              # Start serial monitor
+;    pio device monitor -b 115200    # With specific baud rate
+;
+; 5. Library management:
+;    pio lib search "RFID"           # Search for libraries
+;    pio lib install "MFRC522"       # Install library
+;    pio lib list                    # List installed libraries
+;
+; 6. Project structure for testing:
+;    MyProject/
+;    ├── platformio.ini
+;    ├── src/
+;    │   └── main.cpp
+;    ├── include/
+;    │   ├── config.h
+;    │   ├── interfaces/           # Abstract interfaces
+;    │   │   └── IRFIDReader.h
+;    │   └── ArduinoCompat.h       # For native builds
+;    ├── lib/
+;    │   └── Scanner/              # Reusable library code
+;    │       ├── Scanner.cpp
+;    │       └── Scanner.h
+;    └── test/
+;        └── native/               # Native tests
+;            ├── test_scanner.cpp
+;            └── mocks/
+;                └── MockRFIDReader.h
