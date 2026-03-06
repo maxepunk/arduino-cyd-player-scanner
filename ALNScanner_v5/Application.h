@@ -1366,6 +1366,23 @@ inline void Application::setup() {
     auto& sd = hal::SDCard::getInstance();
 
     _ui = new ui::UIStateMachine(display, touch, audio, sd);
+
+    // Wire status provider so tap-for-status shows real data
+    _ui->setStatusProvider([this]() -> ui::StatusScreen::SystemStatus {
+        auto& orch = services::OrchestratorService::getInstance();
+        auto& config = services::ConfigService::getInstance();
+
+        ui::StatusScreen::SystemStatus status;
+        status.connState = orch.getState();
+        status.wifiSSID = WiFi.SSID();
+        status.localIP = WiFi.localIP().toString();
+        status.queueSize = orch.getQueueSize();
+        status.maxQueueSize = queue_config::MAX_QUEUE_SIZE;
+        status.teamID = config.getConfig().teamID;
+        status.deviceID = config.getConfig().deviceID;
+        return status;
+    });
+
     _ui->showReady(_rfidInitialized, _debugMode);
 
     Serial.println("\n━━━ Setup Complete ━━━");
