@@ -121,6 +121,35 @@ arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=115200
 
 ---
 
+## Testing
+
+### PlatformIO Native Tests
+
+Unit tests run on the host machine (Pi 5) using PlatformIO's `native` platform. No ESP32 hardware needed.
+
+```bash
+pio test -e native              # Run all tests
+pio test -e native -f test_config  # Run only config tests
+pio test -e native -f test_token   # Run only token tests
+```
+
+**What's tested:**
+- `models/Config.h`: `validate()` (SSID/password/URL/teamID validation, http→https auto-upgrade), `isComplete()`, default values
+- `models/Token.h`: `cleanTokenId()` (colon/space removal, lowercase, trim), `isVideoToken()`, `getImagePath()`/`getAudioPath()` path construction, `ScanData` validation
+- `services/PayloadBuilder.h`: `buildScanJson()` (single scan payload), `parseScanFromJsonl()` (queue deserialization), `buildBatchJson()` (batch upload payload), round-trip serialization
+
+**What's NOT tested (requires future mock infrastructure):**
+- `services/OrchestratorService.h`: HTTP calls, WiFi management, SD queue file I/O, FreeRTOS background task
+- `hal/` layer: Hardware-dependent (RFID, display, audio, touch, SD card)
+- `ui/` layer: Depends on hal/ and display hardware
+- `services/ConfigService.h`: SD card file I/O (needs SD mock)
+
+**Mock infrastructure:** `mock/Arduino.h` provides String class, Serial stubs, isDigit(), F() macro. The real `config.h` compiles as-is (pure constexpr constants).
+
+**Adding new tests:** Create `test/test_<name>/test_<name>.cpp`, include `<unity.h>` and `<Arduino.h>`, use `TEST_ASSERT_*` macros.
+
+---
+
 ## Critical Data Structures
 
 ```cpp
