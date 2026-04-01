@@ -35,6 +35,7 @@
 #include "../models/ConnectionState.h"
 #include "../hal/SDCard.h"
 #include "../config.h"
+#include "PayloadBuilder.h"
 
 namespace services {
 
@@ -178,16 +179,8 @@ public:
             return false;
         }
 
-        // Build JSON payload
-        JsonDocument doc;
-        doc["tokenId"] = scan.tokenId;
-        if (scan.teamId.length() > 0) doc["teamId"] = scan.teamId;
-        doc["deviceId"] = scan.deviceId;
-        doc["deviceType"] = scan.deviceType;  // P2.3: Required by backend validators
-        doc["timestamp"] = scan.timestamp;
-
-        String requestBody;
-        serializeJson(doc, requestBody);
+        // Build JSON payload (extracted to PayloadBuilder.h for DRY + testability)
+        String requestBody = services::buildScanJson(scan);
 
         LOG_INFO("[ORCH-SEND] URL: %s/api/scan\n", config.orchestratorURL.c_str());
         LOG_INFO("[ORCH-SEND] Payload: %s\n", requestBody.c_str());
@@ -251,16 +244,8 @@ public:
             return;
         }
 
-        // Build JSONL entry
-        JsonDocument doc;
-        doc["tokenId"] = scan.tokenId;
-        if (scan.teamId.length() > 0) doc["teamId"] = scan.teamId;
-        doc["deviceId"] = scan.deviceId;
-        doc["deviceType"] = scan.deviceType;  // P2.3: Required by backend validators
-        doc["timestamp"] = scan.timestamp;
-
-        String jsonLine;
-        serializeJson(doc, jsonLine);
+        // Build JSONL entry (extracted to PayloadBuilder.h for DRY + testability)
+        String jsonLine = services::buildScanJson(scan);
 
         LOG_INFO("[ORCH-QUEUE] Entry: %s\n", jsonLine.c_str());
         LOG_INFO("[ORCH-QUEUE] Entry size: %d bytes\n", jsonLine.length());
@@ -455,22 +440,8 @@ public:
         String batchId = config.deviceID + "_" + String(_nextBatchId);
         LOG_INFO("[ORCH-BATCH] Batch ID: %s\n", batchId.c_str());
 
-        // Build batch request JSON
-        JsonDocument doc;
-        doc["batchId"] = batchId;
-        JsonArray transactions = doc["transactions"].to<JsonArray>();
-
-        for (const models::ScanData& entry : batch) {
-            JsonObject transaction = transactions.add<JsonObject>();
-            transaction["tokenId"] = entry.tokenId;
-            if (entry.teamId.length() > 0) transaction["teamId"] = entry.teamId;
-            transaction["deviceId"] = entry.deviceId;
-            transaction["deviceType"] = entry.deviceType;  // P2.3: Required by backend validators
-            transaction["timestamp"] = entry.timestamp;
-        }
-
-        String requestBody;
-        serializeJson(doc, requestBody);
+        // Build batch request JSON (extracted to PayloadBuilder.h for DRY + testability)
+        String requestBody = services::buildBatchJson(batchId, batch);
 
         LOG_INFO("[ORCH-BATCH] Request body size: %d bytes\n", requestBody.length());
 
@@ -821,35 +792,17 @@ private:
             line.trim();
             if (line.length() == 0) continue;
 
-            JsonDocument doc;
-            DeserializationError error = deserializeJson(doc, line);
-
-            if (error == DeserializationError::Ok) {
-                // Validate required fields (P2.3: deviceType now required)
-                if (doc.containsKey("tokenId") && doc.containsKey("deviceId") &&
-                    doc.containsKey("timestamp")) {
-
-                    models::ScanData scan;
-                    scan.tokenId = doc["tokenId"].as<String>();
-                    scan.teamId = doc.containsKey("teamId") ? doc["teamId"].as<String>() : "";
-                    scan.deviceId = doc["deviceId"].as<String>();
-                    // P2.3: Read deviceType from queue (defaults to "esp32" if missing for backwards compat)
-                    scan.deviceType = doc.containsKey("deviceType") ? doc["deviceType"].as<String>() : "esp32";
-                    scan.timestamp = doc["timestamp"].as<String>();
-
+            models::ScanData scan;
+            if (services::parseScanFromJsonl(line, scan)) {
                     batch.push_back(scan);
                     count++;
 
                     LOG_INFO("[ORCH-QUEUE-READ] Entry %d: tokenId=%s\n",
                              count, scan.tokenId.c_str());
-                } else {
-                    skipped++;
-                    LOG_INFO("[ORCH-QUEUE-READ] ✗ Skipped line (missing fields): %s\n",
-                             line.c_str());
-                }
             } else {
-                skipped++;
-                LOG_INFO("[ORCH-QUEUE-READ] ✗ Skipped corrupt line: %s\n", line.c_str());
+                    skipped++;
+                    LOG_INFO("[ORCH-QUEUE-READ] ✗ Skipped invalid line: %s\n",
+                             line.c_str());
             }
         }
 
