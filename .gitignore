@@ -34,3 +34,6 @@ sd-card-deploy/config.txt
 sd-card-deploy/device_id.txt
 sd-card-deploy/queue.jsonl
 sd-card-deploy/tokens.json
+
+# PlatformIO build artifacts
+.pio/
