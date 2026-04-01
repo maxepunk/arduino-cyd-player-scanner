@@ -42,6 +42,11 @@ public:
     String(const String& s) = default;
     String(String&& s) = default;
     String(const __FlashStringHelper* f) : _buf(reinterpret_cast<const char*>(f)) {}
+    // Numeric constructors (used by OrchestratorService: String(_nextBatchId), Application: String(i))
+    String(int val) : _buf(std::to_string(val)) {}
+    String(unsigned int val) : _buf(std::to_string(val)) {}
+    String(long val) : _buf(std::to_string(val)) {}
+    String(unsigned long val) : _buf(std::to_string(val)) {}
 
     // Assignment
     String& operator=(const char* s) { _buf = s ? s : ""; return *this; }

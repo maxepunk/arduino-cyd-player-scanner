@@ -793,6 +793,8 @@ private:
             if (line.length() == 0) continue;
 
             models::ScanData scan;
+            // parseScanFromJsonl returns false for both corrupt JSON and missing
+            // required fields. The raw line is logged for post-game diagnosis.
             if (services::parseScanFromJsonl(line, scan)) {
                 batch.push_back(scan);
                 count++;
