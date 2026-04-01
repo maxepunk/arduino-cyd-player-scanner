@@ -15,7 +15,6 @@
 #include <ArduinoJson.h>
 #include <vector>
 #include "../models/Token.h"
-#include "../models/Config.h"
 
 namespace services {
 

@@ -794,15 +794,15 @@ private:
 
             models::ScanData scan;
             if (services::parseScanFromJsonl(line, scan)) {
-                    batch.push_back(scan);
-                    count++;
+                batch.push_back(scan);
+                count++;
 
-                    LOG_INFO("[ORCH-QUEUE-READ] Entry %d: tokenId=%s\n",
-                             count, scan.tokenId.c_str());
+                LOG_INFO("[ORCH-QUEUE-READ] Entry %d: tokenId=%s\n",
+                         count, scan.tokenId.c_str());
             } else {
-                    skipped++;
-                    LOG_INFO("[ORCH-QUEUE-READ] ✗ Skipped invalid line: %s\n",
-                             line.c_str());
+                skipped++;
+                LOG_INFO("[ORCH-QUEUE-READ] ✗ Skipped invalid line: %s\n",
+                         line.c_str());
             }
         }
 
