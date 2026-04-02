@@ -106,6 +106,17 @@ namespace freertos_config {
   #define LOG_DEBUG(...) Serial.printf(__VA_ARGS__)
 #endif
 
+// NDEF diagnostic logging — enable even in production builds
+// Serial TX still works when RFID is active (only RX is killed by GPIO 3)
+// Uncomment to capture byte-level NDEF data during game sessions:
+// #define NDEF_DEBUG
+
+#ifdef NDEF_DEBUG
+  #define LOG_NDEF(...) Serial.printf(__VA_ARGS__)
+#else
+  #define LOG_NDEF(...) ((void)0)
+#endif
+
 // Always compile info/error logs
 #define LOG_INFO(...) Serial.printf(__VA_ARGS__)
 #define LOG_ERROR(tag, msg) logError(F(tag), F(msg))

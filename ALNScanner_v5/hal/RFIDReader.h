@@ -590,6 +590,12 @@ String RFIDReader::extractNDEFTextInternal() {
         return "";
     }
 
+    LOG_NDEF("[NDEF-DIAG] SAK=0x%02X, UID=", _currentUid.sak);
+    for (int i = 0; i < _currentUid.size; i++) {
+        LOG_NDEF("%02X", _currentUid.uidByte[i]);
+    }
+    LOG_NDEF("\n");
+
     String extractedText = "";
 
     // Read pages 3-6 first (16 bytes)
@@ -605,6 +611,10 @@ String RFIDReader::extractNDEFTextInternal() {
         LOG_DEBUG("%02X ", buffer[i]);
     }
     LOG_DEBUG("\n");
+
+    LOG_NDEF("[NDEF-DIAG] Pages 3-6 raw: ");
+    for (int i = 0; i < 16; i++) LOG_NDEF("%02X ", buffer[i]);
+    LOG_NDEF("\n");
 
     // Read pages 7-10 to get complete NDEF message
     uint8_t buffer2[18];
@@ -622,6 +632,10 @@ String RFIDReader::extractNDEFTextInternal() {
         LOG_DEBUG("%02X ", buffer2[i]);
     }
     LOG_DEBUG("\n");
+
+    LOG_NDEF("[NDEF-DIAG] Pages 7-10 raw: ");
+    for (int i = 0; i < 16; i++) LOG_NDEF("%02X ", buffer2[i]);
+    LOG_NDEF("\n");
 
     // Parse NDEF structure
     // Look for NDEF TLV (0x03)
@@ -657,6 +671,8 @@ String RFIDReader::extractNDEFTextInternal() {
             }
         }
     }
+
+    LOG_NDEF("[NDEF-DIAG] TLV scan result: ndefStart=%d, ndefLength=%d\n", ndefStart, ndefLength);
 
     // If we found an NDEF message
     if (ndefStart >= 0 && ndefLength > 0) {
@@ -722,6 +738,7 @@ String RFIDReader::extractNDEFTextInternal() {
                     }
 
                     LOG_INFO("[NDEF] Extracted text: '%s'\n", extractedText.c_str());
+                    LOG_NDEF("[NDEF-DIAG] NDEF parse SUCCESS — text='%s'\n", extractedText.c_str());
                     return extractedText;
                 }
             }
@@ -730,6 +747,7 @@ String RFIDReader::extractNDEFTextInternal() {
 
     LOG_DEBUG("[NDEF] No valid NDEF text record found\n");
     LOG_DEBUG("[NDEF-DIAG] Post-extraction heap: %d\n", ESP.getFreeHeap());
+    LOG_NDEF("[NDEF-DIAG] NDEF parse FAILED — returning empty (caller will use UID hex fallback)\n");
     return "";
 }
 
