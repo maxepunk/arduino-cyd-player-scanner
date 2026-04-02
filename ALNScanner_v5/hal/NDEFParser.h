@@ -70,6 +70,7 @@ inline String parseNDEFText(const uint8_t* pages3to6, size_t len1,
     LOG_NDEF("[NDEF-PARSE] TLV result: ndefStart=%d, ndefLength=%d\n", ndefStart, ndefLength);
 
     if (ndefStart < 0 || ndefLength <= 0) {
+        LOG_NDEF("[NDEF-PARSE] FAILED: no NDEF TLV found\n");
         return "";
     }
 
@@ -91,6 +92,7 @@ inline String parseNDEFText(const uint8_t* pages3to6, size_t len1,
 
     // Parse NDEF record
     if (ndefLength < 7) {
+        LOG_NDEF("[NDEF-PARSE] FAILED: NDEF message too short (%d bytes)\n", ndefLength);
         return "";
     }
 
@@ -98,6 +100,7 @@ inline String parseNDEFText(const uint8_t* pages3to6, size_t len1,
 
     // Check TNF=001 (Well-known type)
     if ((recordHeader & 0x07) != 0x01) {
+        LOG_NDEF("[NDEF-PARSE] FAILED: wrong TNF=0x%02X (expected 0x01)\n", recordHeader & 0x07);
         return "";
     }
 
@@ -106,6 +109,7 @@ inline String parseNDEFText(const uint8_t* pages3to6, size_t len1,
 
     // Must be a Text record (type='T', length=1)
     if (typeLength != 1 || ndefMessage[3] != 'T') {
+        LOG_NDEF("[NDEF-PARSE] FAILED: not a Text record (typeLen=%d, type='%c')\n", typeLength, ndefMessage[3]);
         return "";
     }
 
@@ -114,6 +118,7 @@ inline String parseNDEFText(const uint8_t* pages3to6, size_t len1,
     int textLength = payloadLength - 1 - langCodeLen;
 
     if (textLength <= 0 || textStart + textLength > ndefLength) {
+        LOG_NDEF("[NDEF-PARSE] FAILED: text bounds invalid (start=%d, len=%d, ndefLen=%d)\n", textStart, textLength, ndefLength);
         return "";
     }
 
