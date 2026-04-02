@@ -158,9 +158,13 @@ Serial TX remains active even when RFID uses GPIO 3 (only RX is killed).
 Use during game sessions to capture byte sequences for test fixtures:
 1. Uncomment `#define NDEF_DEBUG` in `config.h`
 2. Compile and upload
-3. Monitor Serial output during scans: `arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=115200`
+3. Capture TX output with a passive read: `stty -F /dev/ttyUSB0 115200 raw && cat /dev/ttyUSB0 | tee ndef_capture.log`
 4. Copy `[NDEF-DIAG]` lines for failing scans
 5. Re-comment `#define NDEF_DEBUG` after capture
+
+**WARNING:** Do NOT use `arduino-cli monitor` during RFID scanning. It opens the serial
+port bidirectionally — the USB-serial chip drives GPIO 3 (RX) while RFID uses it as
+chip select (SS), causing bus contention that can degrade scan reliability.
 
 ---
 
