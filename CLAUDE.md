@@ -137,6 +137,7 @@ pio test -e native -f test_token   # Run only token tests
 - `models/Config.h`: `validate()` (SSID/password/URL/teamID validation, http→https auto-upgrade), `isComplete()`, default values
 - `models/Token.h`: `cleanTokenId()` (colon/space removal, lowercase, trim), `isVideoToken()`, `getImagePath()`/`getAudioPath()` path construction, `ScanData` validation
 - `services/PayloadBuilder.h`: `buildScanJson()` (single scan payload), `parseScanFromJsonl()` (queue deserialization), `buildBatchJson()` (batch upload payload), round-trip serialization
+- `hal/NDEFParser.h`: `parseNDEFText()` (TLV parsing, NDEF record extraction, SAK validation, page-spanning text, edge cases)
 
 **What's NOT tested (requires future mock infrastructure):**
 - `services/OrchestratorService.h`: HTTP calls, WiFi management, SD queue file I/O, FreeRTOS background task
@@ -147,6 +148,19 @@ pio test -e native -f test_token   # Run only token tests
 **Mock infrastructure:** `mock/Arduino.h` provides String class, Serial stubs, isDigit(), F() macro. The real `config.h` compiles as-is (pure constexpr constants).
 
 **Adding new tests:** Create `test/test_<name>/test_<name>.cpp`, include `<unity.h>` and `<Arduino.h>`, use `TEST_ASSERT_*` macros.
+
+### NDEF Diagnostic Logging
+
+Uncomment `#define NDEF_DEBUG` in `config.h` to enable production-safe NDEF byte logging.
+Outputs raw page bytes, TLV parse results, and extraction outcomes via Serial TX.
+Serial TX remains active even when RFID uses GPIO 3 (only RX is killed).
+
+Use during game sessions to capture byte sequences for test fixtures:
+1. Uncomment `#define NDEF_DEBUG` in `config.h`
+2. Compile and upload
+3. Monitor Serial output during scans: `arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=115200`
+4. Copy `[NDEF-DIAG]` lines for failing scans
+5. Re-comment `#define NDEF_DEBUG` after capture
 
 ---
 
