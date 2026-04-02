@@ -92,6 +92,7 @@ public:
     // Concatenation
     String operator+(const char* s) const { String r(*this); r._buf += (s ? s : ""); return r; }
     String operator+(const String& s) const { String r(*this); r._buf += s._buf; return r; }
+    String& operator+=(char c) { _buf += c; return *this; }
     String& operator+=(const char* s) { _buf += (s ? s : ""); return *this; }
     String& operator+=(const String& s) { _buf += s._buf; return *this; }
 

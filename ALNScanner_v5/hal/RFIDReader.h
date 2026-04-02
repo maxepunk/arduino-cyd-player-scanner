@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <MFRC522.h>
 #include "../config.h"
+#include "NDEFParser.h"
 
 /**
  * RFIDReader HAL Component - ESP32 Software SPI + MFRC522 + NDEF Extraction
@@ -584,21 +585,19 @@ String RFIDReader::extractNDEFTextInternal() {
     LOG_INFO("[NDEF] Starting NDEF extraction...\n");
     LOG_DEBUG("[NDEF-DIAG] Pre-extraction heap: %d\n", ESP.getFreeHeap());
 
-    // Only process NTAG/Ultralight cards (SAK=0x00)
-    if (_currentUid.sak != 0x00) {
-        LOG_DEBUG("[NDEF] Not an NTAG (SAK=0x%02X), skipping\n", _currentUid.sak);
-        return "";
-    }
-
     LOG_NDEF("[NDEF-DIAG] SAK=0x%02X, UID=", _currentUid.sak);
     for (int i = 0; i < _currentUid.size; i++) {
         LOG_NDEF("%02X", _currentUid.uidByte[i]);
     }
     LOG_NDEF("\n");
 
-    String extractedText = "";
+    // SAK pre-check (avoid unnecessary page reads for non-NTAG cards)
+    if (_currentUid.sak != 0x00) {
+        LOG_DEBUG("[NDEF] Not an NTAG (SAK=0x%02X), skipping\n", _currentUid.sak);
+        return "";
+    }
 
-    // Read pages 3-6 first (16 bytes)
+    // Read pages 3-6 (16 bytes)
     uint8_t buffer[18];
     uint8_t size = sizeof(buffer);
 
@@ -616,11 +615,9 @@ String RFIDReader::extractNDEFTextInternal() {
     for (int i = 0; i < 16; i++) LOG_NDEF("%02X ", buffer[i]);
     LOG_NDEF("\n");
 
-    // Read pages 7-10 to get complete NDEF message
+    // Read pages 7-10 (16 bytes)
     uint8_t buffer2[18];
     size = sizeof(buffer2);
-
-    // Add delay between reads
     delay(5);
 
     if (!readPage(7, buffer2, &size)) {
@@ -637,118 +634,8 @@ String RFIDReader::extractNDEFTextInternal() {
     for (int i = 0; i < 16; i++) LOG_NDEF("%02X ", buffer2[i]);
     LOG_NDEF("\n");
 
-    // Parse NDEF structure
-    // Look for NDEF TLV (0x03)
-    int ndefStart = -1;
-    int ndefLength = 0;
-
-    // Scan through the buffer looking for TLV blocks
-    for (int i = 4; i < 12; i++) {  // Start after CC
-        uint8_t tlvType = buffer[i];
-
-        LOG_DEBUG("[NDEF] Checking position %d: type=0x%02X\n", i, tlvType);
-
-        if (tlvType == 0x00) {
-            // NULL TLV, skip
-            continue;
-        } else if (tlvType == 0xFE) {
-            // Terminator TLV
-            break;
-        } else if (tlvType == 0x01) {
-            // Lock Control TLV
-            if (i + 1 < 16) {
-                uint8_t lockLen = buffer[i + 1];
-                LOG_DEBUG("[NDEF] Found Lock Control TLV at %d, length=%d\n", i, lockLen);
-                i += 1 + lockLen;  // Skip this TLV
-            }
-        } else if (tlvType == 0x03) {
-            // NDEF Message TLV
-            if (i + 1 < 16) {
-                ndefLength = buffer[i + 1];
-                ndefStart = i + 2;
-                LOG_DEBUG("[NDEF] Found NDEF TLV at %d, length=%d, start=%d\n", i, ndefLength, ndefStart);
-                break;
-            }
-        }
-    }
-
-    LOG_NDEF("[NDEF-DIAG] TLV scan result: ndefStart=%d, ndefLength=%d\n", ndefStart, ndefLength);
-
-    // If we found an NDEF message
-    if (ndefStart >= 0 && ndefLength > 0) {
-        // Build complete NDEF message from both buffers
-        uint8_t ndefMessage[32];
-        int msgIdx = 0;
-
-        // Copy from first buffer (starting from ndefStart)
-        for (int j = ndefStart; j < 16 && msgIdx < ndefLength; j++) {
-            ndefMessage[msgIdx++] = buffer[j];
-        }
-
-        // Copy from second buffer if needed
-        if (msgIdx < ndefLength) {
-            for (int j = 0; j < 16 && msgIdx < ndefLength; j++) {
-                ndefMessage[msgIdx++] = buffer2[j];
-            }
-        }
-
-        LOG_DEBUG("[NDEF] Complete NDEF message: ");
-        for (int i = 0; i < ndefLength; i++) {
-            LOG_DEBUG("%02X ", ndefMessage[i]);
-        }
-        LOG_DEBUG("\n");
-
-        // Parse NDEF record
-        if (ndefLength >= 7) {
-            uint8_t recordHeader = ndefMessage[0];
-
-            LOG_DEBUG("[NDEF] Record header: 0x%02X\n", recordHeader);
-
-            // Check if it's a well-known text record
-            // TNF=001 (Well-known type) - supports multi-record NDEF messages (dual-record tags)
-            if ((recordHeader & 0x07) == 0x01) {
-                uint8_t typeLength = ndefMessage[1];
-                uint8_t payloadLength = ndefMessage[2];
-
-                LOG_DEBUG("[NDEF] Type length: %d, Payload length: %d\n", typeLength, payloadLength);
-
-                if (typeLength == 1 && ndefMessage[3] == 'T') {
-                    // Text record
-                    uint8_t langCodeLen = ndefMessage[4] & 0x3F;
-
-                    LOG_DEBUG("[NDEF] Language code length: %d\n", langCodeLen);
-
-                    // Extract language code for debugging
-                    String langCode = "";
-                    for (int k = 0; k < langCodeLen && (5 + k) < ndefLength; k++) {
-                        langCode += (char)ndefMessage[5 + k];
-                    }
-                    LOG_DEBUG("[NDEF] Language: %s\n", langCode.c_str());
-
-                    // Extract the actual text
-                    int textStart = 5 + langCodeLen;
-                    int textLength = payloadLength - 1 - langCodeLen;
-
-                    LOG_DEBUG("[NDEF] Text starts at %d, length %d\n", textStart, textLength);
-
-                    // Extract text
-                    for (int k = 0; k < textLength && (textStart + k) < ndefLength; k++) {
-                        char c = (char)ndefMessage[textStart + k];
-                        extractedText += c;
-                    }
-
-                    LOG_INFO("[NDEF] Extracted text: '%s'\n", extractedText.c_str());
-                    LOG_NDEF("[NDEF-DIAG] NDEF parse SUCCESS — text='%s'\n", extractedText.c_str());
-                    return extractedText;
-                }
-            }
-        }
-    }
-
-    LOG_DEBUG("[NDEF] No valid NDEF text record found\n");
-    LOG_DEBUG("[NDEF-DIAG] Post-extraction heap: %d\n", ESP.getFreeHeap());
-    LOG_NDEF("[NDEF-DIAG] NDEF parse FAILED — returning empty (caller will use UID hex fallback)\n");
-    return "";
+    // Delegate parsing to pure function (testable without hardware)
+    return hal::parseNDEFText(buffer, 16, buffer2, 16, _currentUid.sak);
 }
 
 // === RF FIELD CONTROL ===
