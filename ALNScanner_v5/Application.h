@@ -474,10 +474,13 @@ inline void Application::processRFIDScan() {
     // Get singleton reference
     auto& rfid = hal::RFIDReader::getInstance();
 
-    // Detect card (stores UID in internal state)
+    // Detect card (stores UID in internal state).
+    // Commit 2: minimal caller update to compile with new DetectResult enum.
+    // Commit 3 rewrites this to distinguish NoCard vs CommFailed and route
+    // CommFailed through showScanFailed().
     MFRC522::Uid uid;
-    if (!rfid.detectCard(uid)) {
-        return;  // No card detected
+    if (rfid.detectCard(uid) != hal::DetectResult::Detected) {
+        return;  // No card detected or comm failed
     }
 
     LOG_INFO("[SCAN] Card detected (UID size: %d)\n", uid.size);

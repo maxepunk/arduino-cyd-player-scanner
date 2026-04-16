@@ -379,7 +379,10 @@ Queue removal uses stream-based file rebuild (temp file) instead of loading the 
 
 ```
 1. RFID Detection (Software SPI, 500ms interval)
-   -> REQA -> Select (cascade) -> NDEF extraction
+   -> WUPA -> Select (cascade) -> NDEF extraction via FAST_READ (0x3A)
+   -> Each step retries up to MAX_RETRIES with RETRY_DELAY_MS spacing
+   -> After first NDEF retry, reSelect to recover from card state drop
+   -> detectCard() returns DetectResult::{NoCard, Detected, CommFailed}
 
 2. Token ID Extraction
    - NDEF text (preferred): "kaa001"

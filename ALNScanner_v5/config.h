@@ -47,8 +47,12 @@ namespace timing {
 // PPP RFID CONFIGURATION PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
 
 namespace rfid_config {
+    // Retry parameters (used by detectCard() and extractNDEFText() retry loops)
     constexpr uint8_t MAX_RETRIES = 3;
-    constexpr uint8_t RETRY_DELAY_MS = 20;
+    constexpr uint8_t RETRY_DELAY_MS = 100;      // Community-standard for NTAG state recovery
+    constexpr uint8_t ANTENNA_SETTLE_MS = 5;     // Settling time after RF field enable
+
+    // Low-level SPI/operation timing (unchanged)
     constexpr uint8_t OPERATION_DELAY_US = 10;
     constexpr uint8_t TIMEOUT_MS = 100;
     constexpr uint8_t CLOCK_DELAY_US = 2;

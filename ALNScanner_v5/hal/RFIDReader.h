@@ -36,6 +36,21 @@ struct RFIDStats {
     uint32_t crcErrors = 0;
 };
 
+/**
+ * Result of a single detectCard() call.
+ *
+ * Distinguishes "no card in field" (idle, expected most of the time)
+ * from "card present but comms failed" (card is there but couldn't be
+ * selected cleanly, even after retries). Callers use this to choose
+ * between "silently wait for next scan cycle" (NoCard) and "surface
+ * failure to the user" (CommFailed).
+ */
+enum class DetectResult {
+    NoCard,       // No card in field — fast-path return, no retry spent
+    Detected,     // UID populated, card selected, ready for NDEF read
+    CommFailed    // Card present but comms broken after retries
+};
+
 class RFIDReader {
 public:
     static RFIDReader& getInstance() {
@@ -48,7 +63,7 @@ public:
     bool isInitialized() const { return _initialized; }
 
     // Scanning operations
-    bool detectCard(MFRC522::Uid& uid);
+    DetectResult detectCard(MFRC522::Uid& uid);
     String extractNDEFText();
 
     // Field control (beeping mitigation)
@@ -108,7 +123,16 @@ private:
 
     // === NDEF Extraction ===
 
+    // Single-page READ (0x30): returns 4 pages = 16 bytes.
     bool readPage(uint8_t page, uint8_t* buffer, uint8_t* bufferSize);
+
+    // Multi-page FAST_READ (0x3A): returns (endPage - startPage + 1) * 4 bytes
+    // in a single exchange. Used by extractNDEFTextInternal() to read pages
+    // 3-10 atomically, eliminating the inter-exchange window where card state
+    // could drop between two sequential READ commands.
+    bool readPagesFast(uint8_t startPage, uint8_t endPage,
+                       uint8_t* buffer, uint8_t* bufferSize);
+
     String extractNDEFTextInternal();
 
     // === State ===
@@ -356,8 +380,12 @@ MFRC522::StatusCode RFIDReader::requestA(uint8_t* bufferATQA, uint8_t* bufferSiz
     setRegisterBitMask(MFRC522::CollReg, 0x80);
     delayMicroseconds(100);  // Give time for register to settle
 
-    uint8_t command = MFRC522::PICC_CMD_REQA;
-    uint8_t validBits = 7;  // Short frame for REQA
+    // Use WUPA (Wake-Up, Type A) instead of REQA so we detect cards that
+    // are in HALT state as well as IDLE. REQA ignores HALT-state cards,
+    // which can leave a card stranded if the previous scan halted it but
+    // the card is still physically in the field.
+    uint8_t command = MFRC522::PICC_CMD_WUPA;
+    uint8_t validBits = 7;  // Short frame for WUPA (same framing as REQA)
     MFRC522::StatusCode status = transceiveData(
         &command, 1, bufferATQA, bufferSize, &validBits
     );
@@ -581,6 +609,44 @@ bool RFIDReader::readPage(uint8_t page, uint8_t* buffer, uint8_t* bufferSize) {
     return true;
 }
 
+// FAST_READ (0x3A) — reads pages [startPage..endPage] inclusive in a single
+// exchange. Response is (endPage - startPage + 1) * 4 data bytes plus 2 CRC
+// bytes. For NTAG215 pages 3-10, that's 32 + 2 = 34 bytes, well within the
+// MFRC522's 64-byte FIFO.
+//
+// Collapses two sequential READ commands into one exchange, eliminating the
+// inter-exchange window where card RF-coupling wobble can drop the card out
+// of ACTIVE state (the dominant historical failure mode).
+bool RFIDReader::readPagesFast(uint8_t startPage, uint8_t endPage,
+                                uint8_t* buffer, uint8_t* bufferSize) {
+    uint8_t cmdBuffer[5];
+    cmdBuffer[0] = 0x3A;       // FAST_READ command
+    cmdBuffer[1] = startPage;
+    cmdBuffer[2] = endPage;
+
+    MFRC522::StatusCode status = calculateCRC(cmdBuffer, 3, &cmdBuffer[3]);
+    if (status != MFRC522::STATUS_OK) {
+        LOG_DEBUG("[NDEF] FAST_READ CRC failed: %d\n", status);
+        return false;
+    }
+
+    status = transceiveData(cmdBuffer, 5, buffer, bufferSize);
+
+    if (status != MFRC522::STATUS_OK) {
+        LOG_DEBUG("[NDEF] FAST_READ [%d..%d] failed: %d\n", startPage, endPage, status);
+        return false;
+    }
+
+    uint8_t expectedBytes = (endPage - startPage + 1) * 4;
+    if (*bufferSize < expectedBytes) {
+        LOG_DEBUG("[NDEF] FAST_READ short response: got %d, expected >= %d\n",
+                  *bufferSize, expectedBytes);
+        return false;
+    }
+
+    return true;
+}
+
 String RFIDReader::extractNDEFTextInternal() {
     LOG_INFO("[NDEF] Starting NDEF extraction...\n");
     LOG_DEBUG("[NDEF-DIAG] Pre-extraction heap: %d\n", ESP.getFreeHeap());
@@ -597,45 +663,63 @@ String RFIDReader::extractNDEFTextInternal() {
         return "";
     }
 
-    // Read pages 3-6 (16 bytes)
-    uint8_t buffer[18];
-    uint8_t size = sizeof(buffer);
+    // Retry loop: FAST_READ pages 3..10 as a single exchange. On failure,
+    // pause briefly; after the first retry, try re-Select to recover from
+    // card state drop (HALT or IDLE) that can happen if RF coupling blips
+    // during the exchange.
+    for (uint8_t attempt = 1; attempt <= rfid_config::MAX_RETRIES; attempt++) {
+        uint8_t buffer[34];  // 32 data bytes (pages 3..10) + 2 CRC
+        uint8_t size = sizeof(buffer);
 
-    if (!readPage(3, buffer, &size)) {
-        return "";
+        if (readPagesFast(3, 10, buffer, &size)) {
+            LOG_DEBUG("[NDEF] Pages 3-10 via FAST_READ: ");
+            for (int i = 0; i < 32; i++) LOG_DEBUG("%02X ", buffer[i]);
+            LOG_DEBUG("\n");
+
+            LOG_NDEF("[NDEF-DIAG] Pages 3-10 raw: ");
+            for (int i = 0; i < 32; i++) LOG_NDEF("%02X ", buffer[i]);
+            LOG_NDEF("\n");
+
+            // Delegate parsing to pure function (testable without hardware)
+            String result = hal::parseNDEFText(buffer, 32, _currentUid.sak);
+            if (result.length() > 0) {
+                if (attempt > 1) {
+                    LOG_INFO("[NDEF-RETRY] Recovered on attempt %d\n", attempt);
+                    _stats.retryCount += (attempt - 1);
+                }
+                return result;
+            }
+            // Bytes were readable but parser rejected them (malformed TLV,
+            // truncated NDEF, etc). Probably transient bit-error — retry.
+            LOG_INFO("[NDEF-RETRY] attempt %d: bytes read, parse failed\n", attempt);
+        } else {
+            LOG_INFO("[NDEF-RETRY] attempt %d: FAST_READ failed\n", attempt);
+        }
+
+        // Don't delay or reSelect after the final attempt — just return.
+        if (attempt >= rfid_config::MAX_RETRIES) {
+            break;
+        }
+
+        delay(rfid_config::RETRY_DELAY_MS);
+
+        // After a failed read, the card may have dropped from ACTIVE back to
+        // IDLE/HALT. Re-do REQA(WUPA)+Select to put it back into ACTIVE state
+        // before the next FAST_READ attempt.
+        uint8_t bufferATQA[2];
+        uint8_t atqaSize = sizeof(bufferATQA);
+        if (requestA(bufferATQA, &atqaSize) == MFRC522::STATUS_OK &&
+            select(&_currentUid) == MFRC522::STATUS_OK) {
+            LOG_INFO("[NDEF-RETRY] reSelect recovery OK before attempt %d\n", attempt + 1);
+        } else {
+            LOG_INFO("[NDEF-RETRY] reSelect failed before attempt %d\n", attempt + 1);
+            // Don't break — next FAST_READ will try anyway; this just means
+            // the card may have genuinely left the field.
+        }
     }
 
-    LOG_DEBUG("[NDEF] Pages 3-6: ");
-    for (int i = 0; i < 16; i++) {
-        LOG_DEBUG("%02X ", buffer[i]);
-    }
-    LOG_DEBUG("\n");
-
-    LOG_NDEF("[NDEF-DIAG] Pages 3-6 raw: ");
-    for (int i = 0; i < 16; i++) LOG_NDEF("%02X ", buffer[i]);
-    LOG_NDEF("\n");
-
-    // Read pages 7-10 (16 bytes)
-    uint8_t buffer2[18];
-    size = sizeof(buffer2);
-    delay(5);
-
-    if (!readPage(7, buffer2, &size)) {
-        return "";
-    }
-
-    LOG_DEBUG("[NDEF] Pages 7-10: ");
-    for (int i = 0; i < 16; i++) {
-        LOG_DEBUG("%02X ", buffer2[i]);
-    }
-    LOG_DEBUG("\n");
-
-    LOG_NDEF("[NDEF-DIAG] Pages 7-10 raw: ");
-    for (int i = 0; i < 16; i++) LOG_NDEF("%02X ", buffer2[i]);
-    LOG_NDEF("\n");
-
-    // Delegate parsing to pure function (testable without hardware)
-    return hal::parseNDEFText(buffer, 16, buffer2, 16, _currentUid.sak);
+    LOG_INFO("[NDEF-FAIL] All %d attempts exhausted\n", rfid_config::MAX_RETRIES);
+    return "";
 }
 
 // === RF FIELD CONTROL ===
@@ -644,6 +728,12 @@ void RFIDReader::enableRFField() {
     if (!_rfFieldEnabled) {
         writeRegister(MFRC522::TxControlReg, 0x83);  // Enable antenna (bits 0-1 = 11)
         _rfFieldEnabled = true;
+        // Settling time for the RF field to stabilize. NTAG passive tags
+        // draw power from the field; they need a few ms to boot and respond
+        // to REQA/WUPA reliably after a cold-field start. The guard above
+        // means this delay only runs on actual OFF->ON transition, not on
+        // every call.
+        delay(rfid_config::ANTENNA_SETTLE_MS);
         LOG_DEBUG("[RF-FIELD] Antenna enabled\n");
     }
 }
@@ -756,51 +846,78 @@ bool RFIDReader::begin() {
     return true;
 }
 
-bool RFIDReader::detectCard(MFRC522::Uid& uid) {
+DetectResult RFIDReader::detectCard(MFRC522::Uid& uid) {
     if (!_initialized) {
         LOG_ERROR("RFID", "Not initialized!");
-        return false;
+        return DetectResult::CommFailed;
     }
 
     _stats.totalScans++;
 
-    // Enable RF field for scanning
+    // Enable RF field (includes settling delay on OFF->ON transition)
     enableRFField();
 
-    // Request card
-    uint8_t bufferATQA[2];
-    uint8_t bufferSize = sizeof(bufferATQA);
+    // Retry loop. The first attempt fast-exits on timeout (no card in field)
+    // so idle loop iterations don't waste MAX_RETRIES * RETRY_DELAY_MS on the
+    // common no-card case. Subsequent attempts retry on any non-OK status,
+    // since getting past REQA once implies a card IS present and any error
+    // after that is a comms issue worth retrying.
+    for (uint8_t attempt = 1; attempt <= rfid_config::MAX_RETRIES; attempt++) {
+        uint8_t bufferATQA[2];
+        uint8_t bufferSize = sizeof(bufferATQA);
 
-    MFRC522::StatusCode status = requestA(bufferATQA, &bufferSize);
+        MFRC522::StatusCode status = requestA(bufferATQA, &bufferSize);
 
-    if (status != MFRC522::STATUS_OK) {
-        disableRFField();  // Disable when not scanning (beeping mitigation)
-        silenceSPIPins();
-        _stats.failedScans++;
-        return false;
+        if (status == MFRC522::STATUS_TIMEOUT && attempt == 1) {
+            // No card in field — normal idle case. Fast return, no retry spent.
+            disableRFField();
+            silenceSPIPins();
+            return DetectResult::NoCard;
+        }
+
+        if (status != MFRC522::STATUS_OK) {
+            LOG_INFO("[RFID-RETRY] requestA attempt %d failed (status=%d)\n",
+                     attempt, status);
+            if (attempt < rfid_config::MAX_RETRIES) {
+                delay(rfid_config::RETRY_DELAY_MS);
+            }
+            continue;
+        }
+
+        // REQA/WUPA succeeded — try to select
+        status = select(&_currentUid);
+        if (status == MFRC522::STATUS_OK) {
+            // Success
+            memcpy(&uid, &_currentUid, sizeof(MFRC522::Uid));
+            _stats.successfulScans++;
+            if (attempt > 1) {
+                LOG_INFO("[RFID-RETRY] detectCard recovered on attempt %d\n", attempt);
+                _stats.retryCount += (attempt - 1);
+            }
+
+            LOG_INFO("[RFID] Card detected: ");
+            for (uint8_t i = 0; i < uid.size; i++) {
+                LOG_INFO("%02X", uid.uidByte[i]);
+            }
+            LOG_INFO(" (SAK=0x%02X)\n", uid.sak);
+
+            return DetectResult::Detected;
+        }
+
+        LOG_INFO("[RFID-RETRY] select attempt %d failed (status=%d)\n",
+                 attempt, status);
+        if (attempt < rfid_config::MAX_RETRIES) {
+            delay(rfid_config::RETRY_DELAY_MS);
+        }
     }
 
-    // Select card (cascade selection for 7-byte UIDs)
-    status = select(&_currentUid);
-
-    if (status != MFRC522::STATUS_OK) {
-        disableRFField();
-        silenceSPIPins();
-        _stats.failedScans++;
-        return false;
-    }
-
-    // Success - copy UID to output
-    memcpy(&uid, &_currentUid, sizeof(MFRC522::Uid));
-    _stats.successfulScans++;
-
-    LOG_INFO("[RFID] Card detected: ");
-    for (uint8_t i = 0; i < uid.size; i++) {
-        LOG_INFO("%02X", uid.uidByte[i]);
-    }
-    LOG_INFO(" (SAK=0x%02X)\n", uid.sak);
-
-    return true;
+    // All retries exhausted — card was present but we couldn't talk to it.
+    disableRFField();
+    silenceSPIPins();
+    _stats.failedScans++;
+    LOG_INFO("[RFID-FAIL] detectCard: all %d attempts exhausted\n",
+             rfid_config::MAX_RETRIES);
+    return DetectResult::CommFailed;
 }
 
 String RFIDReader::extractNDEFText() {
@@ -811,8 +928,15 @@ String RFIDReader::extractNDEFText() {
 
     String result = extractNDEFTextInternal();
 
-    // Halt card and disable field after extraction
-    haltA();
+    // Only halt the card on SUCCESS. On failure we leave the card in
+    // ACTIVE state so that either the in-function reSelect or a quick
+    // external retry can still reach it. The disableRFField() call that
+    // follows removes RF power, which forces the card back to IDLE —
+    // so on the next scan cycle, WUPA + settle-delay will wake it
+    // cleanly regardless of what state it was in.
+    if (result.length() > 0) {
+        haltA();
+    }
     disableRFField();
     silenceSPIPins();
 

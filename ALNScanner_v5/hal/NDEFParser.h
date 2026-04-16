@@ -2,10 +2,16 @@
 
 /**
  * @file NDEFParser.h
- * @brief Pure NDEF text extraction from raw page data.
+ * @brief Pure NDEF text extraction from raw NTAG page data.
  *
  * Extracted from RFIDReader.h extractNDEFTextInternal() for testability.
  * Takes raw NTAG page bytes as input — no hardware dependencies.
+ *
+ * Single-buffer API: the caller provides one contiguous buffer covering
+ * NTAG pages 3..10 (32 bytes). This replaces the earlier two-buffer
+ * signature which was an artifact of the previous two-READ protocol
+ * implementation; the unified buffer simplifies parsing and extends
+ * the TLV-scan range so NDEF TLVs past page 5 are no longer missed.
  */
 
 #include <Arduino.h>
@@ -16,34 +22,35 @@ namespace hal {
 /**
  * Parse NDEF text record from raw NTAG page data.
  *
- * @param pages3to6   Raw bytes from NTAG pages 3-6 (16 bytes minimum)
- * @param len1        Length of pages3to6 buffer
- * @param pages7to10  Raw bytes from NTAG pages 7-10 (16 bytes minimum)
- * @param len2        Length of pages7to10 buffer
- * @param sak         SAK byte from card selection (0x00 = NTAG/Ultralight)
- * @return            Extracted text, or empty string on failure
+ * @param pages3to10  Raw bytes from NTAG pages 3-10 (32 bytes minimum).
+ *                    Byte 0 is the first byte of page 3 (CC).
+ * @param len         Length of pages3to10 buffer (must be >= 32).
+ * @param sak         SAK byte from card selection (0x00 = NTAG/Ultralight).
+ * @return            Extracted text, or empty string on failure.
  */
-inline String parseNDEFText(const uint8_t* pages3to6, size_t len1,
-                            const uint8_t* pages7to10, size_t len2,
-                            uint8_t sak) {
+inline String parseNDEFText(const uint8_t* pages3to10, size_t len, uint8_t sak) {
     // Only process NTAG/Ultralight cards (SAK=0x00)
     if (sak != 0x00) {
         LOG_NDEF("[NDEF-PARSE] Not an NTAG (SAK=0x%02X), skipping\n", sak);
         return "";
     }
 
-    if (len1 < 16 || len2 < 16) {
-        LOG_NDEF("[NDEF-PARSE] Insufficient page data (len1=%zu, len2=%zu)\n", len1, len2);
+    if (len < 32) {
+        LOG_NDEF("[NDEF-PARSE] Insufficient page data (len=%zu)\n", len);
         return "";
     }
 
-    // Parse TLV structure — look for NDEF Message TLV (0x03)
+    // Parse TLV structure — look for NDEF Message TLV (0x03).
+    // CC is on page 3 (bytes 0-3); TLVs begin at byte 4 (page 4).
+    // Scan range extends through byte 27 (end of page 9), leaving room
+    // for the length byte at [i+1]. This range is wider than the old
+    // two-buffer parser (which only scanned bytes 4..11), so tokens
+    // with a longer Lock Control TLV preamble are no longer missed.
     int ndefStart = -1;
     int ndefLength = 0;
 
-    // Scan through pages3to6 looking for TLV blocks (start after CC at byte 4)
-    for (int i = 4; i < 12; i++) {
-        uint8_t tlvType = pages3to6[i];
+    for (int i = 4; i < 28; i++) {
+        uint8_t tlvType = pages3to10[i];
 
         if (tlvType == 0x00) {
             // NULL TLV, skip
@@ -52,15 +59,15 @@ inline String parseNDEFText(const uint8_t* pages3to6, size_t len1,
             // Terminator TLV
             break;
         } else if (tlvType == 0x01) {
-            // Lock Control TLV
-            if (i + 1 < 16) {
-                uint8_t lockLen = pages3to6[i + 1];
-                i += 1 + lockLen;  // Skip this TLV
+            // Lock Control TLV: length byte + <length> bytes of lock data
+            if (i + 1 < (int)len) {
+                uint8_t lockLen = pages3to10[i + 1];
+                i += 1 + lockLen;  // Skip this TLV (for-loop i++ advances further)
             }
         } else if (tlvType == 0x03) {
             // NDEF Message TLV
-            if (i + 1 < 16) {
-                ndefLength = pages3to6[i + 1];
+            if (i + 1 < (int)len) {
+                ndefLength = pages3to10[i + 1];
                 ndefStart = i + 2;
                 break;
             }
@@ -74,21 +81,13 @@ inline String parseNDEFText(const uint8_t* pages3to6, size_t len1,
         return "";
     }
 
-    // Build complete NDEF message from both page buffers
-    uint8_t ndefMessage[32];
-    int msgIdx = 0;
-
-    // Copy from first buffer (starting from ndefStart)
-    for (int j = ndefStart; j < 16 && msgIdx < ndefLength; j++) {
-        ndefMessage[msgIdx++] = pages3to6[j];
+    if (ndefStart + ndefLength > (int)len) {
+        LOG_NDEF("[NDEF-PARSE] FAILED: NDEF message exceeds buffer\n");
+        return "";
     }
 
-    // Copy from second buffer if needed
-    if (msgIdx < ndefLength) {
-        for (int j = 0; j < 16 && msgIdx < ndefLength; j++) {
-            ndefMessage[msgIdx++] = pages7to10[j];
-        }
-    }
+    // NDEF message lives at pages3to10[ndefStart..ndefStart+ndefLength]
+    const uint8_t* msg = &pages3to10[ndefStart];
 
     // Parse NDEF record
     if (ndefLength < 7) {
@@ -96,7 +95,7 @@ inline String parseNDEFText(const uint8_t* pages3to6, size_t len1,
         return "";
     }
 
-    uint8_t recordHeader = ndefMessage[0];
+    uint8_t recordHeader = msg[0];
 
     // Check TNF=001 (Well-known type)
     if ((recordHeader & 0x07) != 0x01) {
@@ -104,16 +103,16 @@ inline String parseNDEFText(const uint8_t* pages3to6, size_t len1,
         return "";
     }
 
-    uint8_t typeLength = ndefMessage[1];
-    uint8_t payloadLength = ndefMessage[2];
+    uint8_t typeLength = msg[1];
+    uint8_t payloadLength = msg[2];
 
     // Must be a Text record (type='T', length=1)
-    if (typeLength != 1 || ndefMessage[3] != 'T') {
-        LOG_NDEF("[NDEF-PARSE] FAILED: not a Text record (typeLen=%d, type='%c')\n", typeLength, ndefMessage[3]);
+    if (typeLength != 1 || msg[3] != 'T') {
+        LOG_NDEF("[NDEF-PARSE] FAILED: not a Text record (typeLen=%d, type='%c')\n", typeLength, msg[3]);
         return "";
     }
 
-    uint8_t langCodeLen = ndefMessage[4] & 0x3F;
+    uint8_t langCodeLen = msg[4] & 0x3F;
     int textStart = 5 + langCodeLen;
     int textLength = payloadLength - 1 - langCodeLen;
 
@@ -124,8 +123,8 @@ inline String parseNDEFText(const uint8_t* pages3to6, size_t len1,
 
     // Extract the actual text
     String extractedText = "";
-    for (int k = 0; k < textLength && (textStart + k) < ndefLength; k++) {
-        extractedText += (char)ndefMessage[textStart + k];
+    for (int k = 0; k < textLength; k++) {
+        extractedText += (char)msg[textStart + k];
     }
 
     LOG_NDEF("[NDEF-PARSE] Extracted: '%s'\n", extractedText.c_str());
