@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Last verified: 2026-02-06
+Last verified: 2026-04-16
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -384,11 +384,16 @@ Queue removal uses stream-based file rebuild (temp file) instead of loading the 
    -> After first NDEF retry, reSelect to recover from card state drop
    -> detectCard() returns DetectResult::{NoCard, Detected, CommFailed}
 
-2. Token ID Extraction
-   - NDEF text (preferred): "kaa001"
-   - UID hex fallback: "04a1b2c3d4e5f6"
+2. Token ID Extraction (NDEF text only, e.g. "kaa001")
+   - On NDEF failure after retries: show non-blocking SCAN_FAILED screen
+     ("READ FAILED"), do NOT send to orchestrator. No UID-hex fallback.
 
-3. Orchestrator Routing
+3. Token DB Validation (gate orchestrator send)
+   - Look up tokenId in local tokens.json
+   - If NOT found: show SCAN_FAILED ("UNKNOWN TOKEN"), do NOT send.
+     This ensures the orchestrator only sees real game tokenIds.
+
+4. Orchestrator Routing (for known tokens only)
    - IF connected: POST /api/scan (immediate)
      Payload: {tokenId, teamId?, deviceId, deviceType:"esp32", timestamp}
      - 2xx -> Display token
@@ -396,10 +401,20 @@ Queue removal uses stream-based file rebuild (temp file) instead of loading the 
      - Other -> Queue for retry
    - IF offline: Append to /queue.jsonl
 
-4. Token Display
+5. Token Display
    - Video token (video field set): Show /assets/images/{id}.bmp + "Sending..." overlay, 2.5s auto-hide
    - Regular token: Show /assets/images/{id}.bmp + Play /assets/audio/{id}.wav, double-tap dismiss
 ```
+
+**SCAN_FAILED screen**: non-blocking transient feedback for scan
+failures. Unlike DISPLAYING_TOKEN / SHOWING_STATUS / PROCESSING_VIDEO,
+the SCAN_FAILED state does NOT block RFID — the player can immediately
+re-tap without waiting for the screen to dismiss. Auto-dismisses after
+`timing::SCAN_FAILED_TIMEOUT_MS` (1.5s), or on any tap. Triggered by:
+`CommFailed` (detectCard retries exhausted), `READ FAILED` (NDEF
+extraction retries exhausted), or `UNKNOWN TOKEN` (NDEF OK but tokenId
+not in DB). See `ui/screens/ScanFailedScreen.h` and
+`ui/UIStateMachine.h::showScanFailed()`.
 
 ### Background Task (FreeRTOS Core 0)
 
@@ -432,6 +447,8 @@ Every 10 seconds: check orchestrator health (GET /health), update connection sta
 | No RFID scanning | DEBUG_MODE setting | Send START_SCANNER or set DEBUG_MODE=false |
 | Queue not uploading | WiFi/orchestrator | Check STATUS, verify /health endpoint |
 | Continuous beeping | RFID scan interval | Should be 500ms, not 100ms |
+| `SCAN FAILED` repeats on good tokens | NDEF read reliability | Capture `[NDEF-RETRY]` / `[NDEF-FAIL]` logs (uncomment `#define NDEF_DEBUG`); if retries never recover, suspect marginal RF coupling or counterfeit tags — see plan `/root/.claude/plans/bright-hopping-rossum.md` R4 |
+| `UNKNOWN TOKEN` on real game cards | Token DB sync | `TOKENS` serial command to list DB; re-sync `sd-card-deploy/tokens.json` and the SD card |
 | Serial commands ignored | GPIO 3 conflict | Set DEBUG_MODE=true or use boot override |
 | Colors inverted | TFT_RGB_ORDER | Should be TFT_BGR for dual USB CYD |
 | HTTPS heap corruption | WiFiClientSecure reuse | Create fresh WiFiClientSecure per request |

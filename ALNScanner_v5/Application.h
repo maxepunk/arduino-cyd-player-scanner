@@ -300,11 +300,15 @@ private:
      *
      * EXECUTION FLOW:
      * 1. Check preconditions (initialized, UI not blocked, rate limit)
-     * 2. Scan for RFID card (500ms interval to reduce beeping)
-     * 3. Extract token ID (NDEF text or UID hex fallback)
-     * 4. Send to orchestrator or queue offline
-     * 5. Look up token metadata
-     * 6. Display appropriate screen (video modal or regular token)
+     * 2. Scan for RFID card (500ms interval to reduce beeping); distinguish
+     *    NoCard vs CommFailed via DetectResult enum
+     * 3. Extract token ID from NDEF. On failure, show non-blocking
+     *    SCAN_FAILED screen and do NOT send to orchestrator.
+     * 4. Look up token metadata in local DB BEFORE sending to orchestrator.
+     *    Unknown tokens show SCAN_FAILED and are not uploaded — the
+     *    orchestrator only ever sees real game tokenIds.
+     * 5. Send known tokens to orchestrator or queue offline.
+     * 6. Display appropriate screen (video modal or regular token).
      *
      * RATE LIMITING:
      * - 500ms minimum between scans (reduces GPIO 27 beeping)
@@ -430,83 +434,93 @@ inline void Application::processTouch() {
 /**
  * processRFIDScan() - RFID scanning and token processing
  *
- * Extracted from v4.1 lines 3678-3839
- *
  * Flow:
- * 1. Guard conditions (RFID init, UI blocking, rate limiting)
- * 2. Scan for card (using detectCard + extractNDEFText)
- * 3. Send to orchestrator (or queue if offline)
- * 4. Display appropriate screen (video modal or regular token)
+ * 1. Guard conditions (RFID init, UI blocking, rate limiting).
+ * 2. Detect card via DetectResult enum (NoCard/Detected/CommFailed).
+ * 3. Extract tokenId from NDEF. On failure -> showScanFailed(), no
+ *    orchestrator send, no UID fallback.
+ * 4. Look up token in local DB before sending to orchestrator. Unknown
+ *    tokens are reported to the user but NOT uploaded — the old UID-hex
+ *    fallback is removed so that the orchestrator only ever sees real
+ *    game tokenIds.
+ * 5. Display token (video modal or regular) only for known, valid tokens.
  *
- * Guard conditions:
- * - Skip if RFID not initialized (DEBUG_MODE deferred init)
- * - Skip if UI is blocking (image/status screen displayed)
- * - Rate limit to 500ms between scans (reduces GPIO 27 beeping)
+ * Failure routing (all via _ui->showScanFailed, which is non-blocking):
+ *   CommFailed  -> "COMM FAILED"    (detect retries exhausted)
+ *   NDEF empty  -> "READ FAILED"    (NDEF extraction retries exhausted)
+ *   Unknown ID  -> "UNKNOWN TOKEN"  (NDEF OK, but tokenId not in DB)
  *
- * Orchestrator routing:
- * - ORCH_CONNECTED: sendScan() → queue on failure
- * - ORCH_WIFI_CONNECTED or ORCH_DISCONNECTED: queue immediately
- *
- * Token display:
- * - Video tokens: showProcessing() with 2.5s auto-dismiss
- * - Regular tokens: showToken() with double-tap dismiss
- * - Unknown tokens: fallback to UID-based paths
+ * The SCAN_FAILED UI state does NOT block RFID scanning, so the player
+ * can immediately re-tap a token after a transient failure without
+ * waiting for the screen to dismiss.
  */
 inline void Application::processRFIDScan() {
     // ═══ GUARD CONDITIONS ═══════════════════════════════════════════
-    // 1. Skip if RFID not initialized (DEBUG_MODE)
     if (!_rfidInitialized) {
         return;
     }
 
-    // 2. Skip if UI is blocking (image/status screen displayed)
     if (_ui && _ui->isBlockingRFID()) {
         return;
     }
 
-    // 3. Rate limiting (500ms between scans)
     if (millis() - _lastRFIDScan < timing::RFID_SCAN_INTERVAL_MS) {
         return;
     }
     _lastRFIDScan = millis();
 
-    // ═══ RFID SCANNING ══════════════════════════════════════════════
-    // Get singleton reference
+    // ═══ RFID DETECTION ═════════════════════════════════════════════
     auto& rfid = hal::RFIDReader::getInstance();
 
-    // Detect card (stores UID in internal state).
-    // Commit 2: minimal caller update to compile with new DetectResult enum.
-    // Commit 3 rewrites this to distinguish NoCard vs CommFailed and route
-    // CommFailed through showScanFailed().
     MFRC522::Uid uid;
-    if (rfid.detectCard(uid) != hal::DetectResult::Detected) {
-        return;  // No card detected or comm failed
+    hal::DetectResult det = rfid.detectCard(uid);
+
+    if (det == hal::DetectResult::NoCard) {
+        return;  // Normal idle — no card in field
     }
 
+    if (det == hal::DetectResult::CommFailed) {
+        LOG_INFO("[SCAN-FAIL] Card detect comm failure\n");
+        if (_ui) {
+            _ui->showScanFailed("COMM FAILED");
+        }
+        return;
+    }
+
+    // det == Detected
     LOG_INFO("[SCAN] Card detected (UID size: %d)\n", uid.size);
 
-    // Extract token ID (NDEF text or UID hex fallback)
+    // ═══ NDEF EXTRACTION ════════════════════════════════════════════
+    // extractNDEFText() handles its own retries and reSelect recovery,
+    // and internally disables the RF field on return (success or failure).
     String tokenId = rfid.extractNDEFText();
 
     if (tokenId.length() == 0) {
-        // No NDEF text - use UID as token ID
-        tokenId = "";
-        for (byte i = 0; i < uid.size; i++) {
-            char hex[3];
-            sprintf(hex, "%02x", uid.uidByte[i]);
-            tokenId += String(hex);
+        LOG_INFO("[SCAN-FAIL] NDEF extraction failed after retries\n");
+        if (_ui) {
+            _ui->showScanFailed("READ FAILED");
         }
-        LOG_INFO("[SCAN] Using UID as tokenId: %s\n", tokenId.c_str());
-    } else {
-        LOG_INFO("[SCAN] Using NDEF text as tokenId: %s\n", tokenId.c_str());
+        return;
     }
 
-    // Halt card (prepare for next scan)
-    // Note: v4.1 used SoftSPI_PICC_HaltA() - need to check if RFIDReader has halt()
-    rfid.disableRFField();  // Disable RF field as mitigation
+    LOG_INFO("[SCAN] NDEF tokenId: %s\n", tokenId.c_str());
+
+    // ═══ TOKEN DB VALIDATION (gate orchestrator send) ═══════════════
+    // Look up the token in the local database BEFORE reporting to the
+    // orchestrator. Unknown tokenIds are treated as scan failures —
+    // they must not pollute session data with unrecognized entries.
+    auto& tokens = services::TokenService::getInstance();
+    const models::TokenMetadata* token = tokens.get(tokenId);
+
+    if (!token) {
+        LOG_INFO("[SCAN-FAIL] Unknown tokenId '%s' (not in DB)\n", tokenId.c_str());
+        if (_ui) {
+            _ui->showScanFailed("UNKNOWN TOKEN");
+        }
+        return;
+    }
 
     // ═══ ORCHESTRATOR SEND/QUEUE ════════════════════════════════════
-    // Get singleton references
     auto& config = services::ConfigService::getInstance();
     auto& orchestrator = services::OrchestratorService::getInstance();
 
@@ -517,48 +531,26 @@ inline void Application::processRFIDScan() {
         generateTimestamp()
     );
 
-    // Send to orchestrator or queue if offline
-    auto connState = orchestrator.getState();
-    if (connState == models::ORCH_CONNECTED) {
+    if (orchestrator.getState() == models::ORCH_CONNECTED) {
         LOG_INFO("[SCAN] Attempting to send to orchestrator...\n");
         if (!orchestrator.sendScan(scan, config.getConfig())) {
-            // Failed to send - queue for later
             LOG_INFO("[SCAN] Send failed, queueing\n");
             orchestrator.queueScan(scan);
         } else {
             LOG_INFO("[SCAN] ✓ Sent to orchestrator\n");
         }
     } else {
-        // Offline - queue immediately
         LOG_INFO("[SCAN] Offline, queueing immediately\n");
         orchestrator.queueScan(scan);
     }
 
-    // ═══ TOKEN LOOKUP AND DISPLAY ═══════════════════════════════════
-    auto& tokens = services::TokenService::getInstance();
-    const models::TokenMetadata* token = tokens.get(tokenId);
-
-    if (token) {
-        // Known token - check if video or regular
-        if (token->isVideoToken()) {
-            // Video token - show processing modal (2.5s auto-dismiss)
-            LOG_INFO("[SCAN] Video token detected\n");
-            _ui->showProcessing(*token);
-        } else {
-            // Regular token - show image + audio (double-tap to dismiss)
-            LOG_INFO("[SCAN] Regular token detected\n");
-            _ui->showToken(*token);
-        }
+    // ═══ TOKEN DISPLAY ══════════════════════════════════════════════
+    if (token->isVideoToken()) {
+        LOG_INFO("[SCAN] Video token detected\n");
+        _ui->showProcessing(*token);
     } else {
-        // Unknown token - construct fallback metadata from UID
-        LOG_INFO("[SCAN] Unknown token - using UID-based fallback\n");
-
-        models::TokenMetadata fallback;
-        fallback.tokenId = tokenId;
-        fallback.video = "";  // Not a video token
-        // Note: image/audio paths auto-constructed from tokenId via getImagePath()/getAudioPath()
-
-        _ui->showToken(fallback);
+        LOG_INFO("[SCAN] Regular token detected\n");
+        _ui->showToken(*token);
     }
 }
 
@@ -1025,6 +1017,26 @@ inline void Application::registerSerialCommands() {
         Serial.println("═══════════════════════════════════════════════");
         Serial.printf("Token ID: %s\n", tokenId.c_str());
 
+        // Mirror real processRFIDScan(): look up the token in the local DB
+        // FIRST. Unknown tokens do NOT get sent to the orchestrator — they
+        // would surface as the UNKNOWN TOKEN screen on a real scan.
+        const auto* token = tokens.get(tokenId);
+        if (!token) {
+            Serial.println("✗ Token not in database");
+            Serial.println("  Real scan would: show UNKNOWN TOKEN screen, NOT send to orchestrator");
+            if (_ui) {
+                _ui->showScanFailed("UNKNOWN TOKEN");
+            }
+            Serial.println("═══════════════════════════════════════════════\n");
+            return;
+        }
+
+        Serial.printf("Token found: %s\n", token->isVideoToken() ? "VIDEO" : "REGULAR");
+        Serial.printf("  Image: %s\n", token->getImagePath().c_str());
+        if (!token->isVideoToken()) {
+            Serial.printf("  Audio: %s\n", token->getAudioPath().c_str());
+        }
+
         // Create scan data (use same timestamp format as real scans)
         models::ScanData scan;
         scan.tokenId = tokenId;
@@ -1044,18 +1056,6 @@ inline void Application::registerSerialCommands() {
         } else {
             Serial.println("Offline, queuing...");
             orch.queueScan(scan);
-        }
-
-        // Display token info (UI would show this)
-        const auto* token = tokens.get(tokenId);
-        if (token) {
-            Serial.printf("Token found: %s\n", token->isVideoToken() ? "VIDEO" : "REGULAR");
-            Serial.printf("  Image: %s\n", token->getImagePath().c_str());
-            if (!token->isVideoToken()) {
-                Serial.printf("  Audio: %s\n", token->getAudioPath().c_str());
-            }
-        } else {
-            Serial.println("Token not in database (would use UID fallback)");
         }
 
         Serial.println("✓ Simulation complete");
