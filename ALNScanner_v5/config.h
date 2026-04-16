@@ -38,6 +38,7 @@ namespace timing {
     constexpr uint32_t DOUBLE_TAP_TIMEOUT_MS = 500;
     constexpr uint32_t TOUCH_PULSE_WIDTH_THRESHOLD_US = 10000;
     constexpr uint32_t PROCESSING_MODAL_TIMEOUT_MS = 2500;
+    constexpr uint32_t SCAN_FAILED_TIMEOUT_MS = 1500;  // Non-blocking failure screen auto-dismiss
     constexpr uint32_t ORCHESTRATOR_CHECK_INTERVAL_MS = 10000;
     constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 10000;
     constexpr uint32_t DEBUG_OVERRIDE_TIMEOUT_MS = 30000;

@@ -113,6 +113,7 @@ arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=115200
 | `REBOOT` | Restart ESP32 |
 | `START_SCANNER` | Initialize RFID (kills serial RX permanently) |
 | `SIMULATE_SCAN:tokenId` | Test token processing without hardware |
+| `SIMULATE_FAIL[:reason]` | Show non-blocking SCAN_FAILED screen for UI verification (default reason: `READ FAILED`) |
 | `QUEUE_TEST` | Add 20 mock scans to queue |
 | `FORCE_UPLOAD` | Manually trigger batch upload |
 | `SHOW_QUEUE` | Display queue contents |

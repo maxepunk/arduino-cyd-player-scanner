@@ -5,6 +5,7 @@
 #include "screens/StatusScreen.h"
 #include "screens/TokenDisplayScreen.h"
 #include "screens/ProcessingScreen.h"
+#include "screens/ScanFailedScreen.h"
 #include "../hal/DisplayDriver.h"
 #include "../hal/TouchDriver.h"
 #include "../hal/AudioDriver.h"
@@ -65,7 +66,8 @@ public:
         READY,              // Ready screen (idle, waiting for scan or tap)
         SHOWING_STATUS,     // Status/diagnostics screen
         DISPLAYING_TOKEN,   // Token display with audio (regular token)
-        PROCESSING_VIDEO    // Processing modal (video token, auto-hide)
+        PROCESSING_VIDEO,   // Processing modal (video token, auto-hide)
+        SCAN_FAILED         // Transient failure screen (non-blocking, auto-hide)
     };
 
     // Constructor with HAL dependency injection
@@ -84,6 +86,7 @@ public:
         , _lastTouchWasValid(false)
         , _lastTouchDebounce(0)
         , _processingStartTime(0)
+        , _scanFailedStartTime(0)
         , _rfidReady(false)
         , _debugMode(false)
     {
@@ -170,6 +173,33 @@ public:
         _processingStartTime = millis();
     }
 
+    // Transition to SCAN_FAILED state (non-blocking)
+    //
+    // Shows a brief failure message and auto-dismisses after
+    // timing::SCAN_FAILED_TIMEOUT_MS (or any tap). Unlike other non-READY
+    // states, SCAN_FAILED does NOT block RFID scanning — see isBlockingRFID().
+    // This means a failed scan does not prevent the player from immediately
+    // re-tapping the same or another token.
+    //
+    // @param reason Short label shown on the screen. Keep under ~16 chars.
+    //               Typical values: "COMM FAILED", "READ FAILED", "UNKNOWN TOKEN".
+    void showScanFailed(const String& reason = "READ FAILED") {
+        LOG_INFO("[UI-STATE] Transitioning to SCAN_FAILED (%s)\n", reason.c_str());
+
+        auto screen = std::unique_ptr<ScanFailedScreen>(
+            new ScanFailedScreen(reason)
+        );
+
+        transitionTo(State::SCAN_FAILED, std::move(screen));
+
+        // Start auto-dismiss timer
+        _scanFailedStartTime = millis();
+
+        // Reset touch state so a quick tap-to-dismiss is recognized cleanly
+        _lastTouchWasValid = false;
+        _lastTouchTime = 0;
+    }
+
     // PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
     // PPP EVENT HANDLING PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
     // PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
@@ -228,6 +258,15 @@ public:
                 showReady(_rfidReady, _debugMode);
             }
         }
+
+        // Check scan-failed auto-dismiss timeout
+        if (_state == State::SCAN_FAILED) {
+            uint32_t elapsed = millis() - _scanFailedStartTime;
+            if (elapsed >= timing::SCAN_FAILED_TIMEOUT_MS) {
+                LOG_INFO("[UI-STATE] SCAN_FAILED timeout - returning to ready\n");
+                showReady(_rfidReady, _debugMode);
+            }
+        }
     }
 
     // Get current state
@@ -267,6 +306,9 @@ private:
 
     // Processing modal timing
     uint32_t _processingStartTime;
+
+    // Scan-failed auto-dismiss timing
+    uint32_t _scanFailedStartTime;
 
     // Cached application state for internal transitions
     bool _rfidReady;
@@ -364,6 +406,12 @@ private:
                 // Processing modal ignores touch (auto-timeout only)
                 LOG_INFO("[UI-STATE] PROCESSING_VIDEO: Touch ignored (auto-timeout)\n");
                 break;
+
+            case State::SCAN_FAILED:
+                // Tap dismisses failure screen early (also auto-dismisses in update())
+                LOG_INFO("[UI-STATE] SCAN_FAILED: Tap dismiss - returning to ready\n");
+                showReady(_rfidReady, _debugMode);
+                break;
         }
     }
 
@@ -379,6 +427,7 @@ inline const char* stateToString(UIStateMachine::State state) {
         case UIStateMachine::State::SHOWING_STATUS:    return "SHOWING_STATUS";
         case UIStateMachine::State::DISPLAYING_TOKEN:  return "DISPLAYING_TOKEN";
         case UIStateMachine::State::PROCESSING_VIDEO:  return "PROCESSING_VIDEO";
+        case UIStateMachine::State::SCAN_FAILED:       return "SCAN_FAILED";
         default:                                        return "UNKNOWN";
     }
 }

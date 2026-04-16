@@ -1059,6 +1059,30 @@ inline void Application::registerSerialCommands() {
         Serial.println("═══════════════════════════════════════════════\n");
     }, "Simulate token scan for testing (no hardware)");
 
+    // SIMULATE_FAIL - Trigger the SCAN_FAILED screen for UI verification
+    // Useful for verifying the non-blocking failure screen behavior without
+    // needing to produce a real scan failure via hardware.
+    serial.registerCommand("SIMULATE_FAIL", [this](const String& args) {
+        String reason = args;
+        reason.trim();
+        if (reason.length() == 0) {
+            reason = "READ FAILED";
+        }
+        Serial.println("\n═══════════════════════════════════════════════");
+        Serial.println("     SIMULATE SCAN FAILURE (UI ONLY)");
+        Serial.println("═══════════════════════════════════════════════");
+        Serial.printf("Reason: %s\n", reason.c_str());
+        if (_ui) {
+            _ui->showScanFailed(reason);
+            Serial.println("✓ SCAN_FAILED screen shown (non-blocking)");
+            Serial.printf("  Auto-dismiss in %lu ms, or tap to dismiss\n",
+                          (unsigned long)timing::SCAN_FAILED_TIMEOUT_MS);
+        } else {
+            Serial.println("✗ UI not initialized");
+        }
+        Serial.println("═══════════════════════════════════════════════\n");
+    }, "Show SCAN_FAILED screen (SIMULATE_FAIL:<reason>)");
+
     // QUEUE_TEST - Add mock scans to queue
     serial.registerCommand("QUEUE_TEST", [&orch, &config](const String& args) {
         Serial.println("\n=== Queue Test ===");
