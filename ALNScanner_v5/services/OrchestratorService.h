@@ -107,6 +107,13 @@ public:
             LOG_INFO("[ORCH-WIFI] Signal Strength: %d dBm\n", WiFi.RSSI());
             LOG_INFO("[ORCH-WIFI] Channel: %d\n", WiFi.channel());
 
+            // Kick off NTP time sync (non-blocking). SNTP runs in background;
+            // time(nullptr) will return real epoch once sync completes (~1-2s).
+            // Until then, generateTimestamp() falls back to a 1970-prefixed
+            // placeholder so the backend can identify un-synced scans.
+            configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+            LOG_INFO("[ORCH-WIFI] NTP sync requested (pool.ntp.org)\n");
+
             // Check orchestrator health
             LOG_INFO("\n[ORCH] Checking orchestrator health...\n");
             LOG_INFO("[ORCH] URL: %s/health?deviceId=%s\n",
@@ -319,7 +326,43 @@ public:
             return _http.httpGET(url, 5000);
         }, "health check");
 
+        // Apply POSIX timezone from /health response (auto-derived by backend).
+        // Quiet on the happy path; a mismatch or parse failure logs.
+        if (resp.code == 200 && resp.body.length() > 0) {
+            applyTimezoneFromHealth(resp.body);
+        }
+
         return (resp.code == 200);
+    }
+
+    /**
+     * @brief Parse `timezone` from /health response body and apply via
+     *        setenv+tzset when it differs from the currently applied value.
+     *
+     * The POSIX TZ string (e.g. "PST8PDT,M3.2.0,M11.1.0") governs how
+     * generateTimestamp() renders local time. It is cached in
+     * `_appliedTimezone` so re-calls don't churn the C runtime state.
+     *
+     * Silent on malformed bodies — the caller already succeeded on the
+     * 200 status, so this is best-effort; we'd rather scan with default
+     * (likely UTC) offsets than reject a reachable orchestrator.
+     */
+    void applyTimezoneFromHealth(const String& body) {
+        StaticJsonDocument<256> doc;
+        DeserializationError err = deserializeJson(doc, body);
+        if (err) {
+            LOG_INFO("[ORCH-TZ] Failed to parse /health body: %s\n", err.c_str());
+            return;
+        }
+        const char* tz = doc["timezone"] | "";
+        if (!tz || !*tz) return;
+
+        if (_appliedTimezone == tz) return;  // No change — avoid tzset churn
+
+        setenv("TZ", tz, 1);
+        tzset();
+        _appliedTimezone = tz;
+        LOG_INFO("[ORCH-TZ] Applied timezone from /health: %s\n", tz);
     }
 
     /**
@@ -609,6 +652,12 @@ private:
 
     // Batch ID counter for idempotency (increments only on successful upload)
     uint32_t _nextBatchId = 0;
+
+    // Last POSIX TZ string applied via setenv/tzset. Initialized from the
+    // orchestrator's /health response on each successful health check; the
+    // comparison prevents redundant setenv/tzset calls (every 10s polling
+    // would otherwise churn the C runtime TZ state unnecessarily).
+    String _appliedTimezone = "";
 
     // ─── HTTP Helper Class (CRITICAL FLASH SAVINGS) ───────────────────
 
