@@ -255,6 +255,25 @@ void test_malformed_record_returns_empty_cleanly() {
     TEST_ASSERT_EQUAL_STRING("", result.c_str());
 }
 
+// Regression: real-world tokens have a chained NDEF message where record 1
+// is a Text record carrying the tokenId and record 2 is a URI record (URL)
+// that extends past page 10. Old parser bailed on the whole message because
+// the declared TLV length exceeded the 32-byte read buffer. Parser must
+// extract the first complete record even when later records are truncated.
+// Bytes captured from a real "mar004" token during PR #4 hardware validation.
+void test_multi_record_first_text_extractable() {
+    uint8_t buf[32] = {
+        0xE1, 0x10, 0x3E, 0x00,                           // CC (page 3)
+        0x03, 0x45,                                       // TLV: NDEF, len=0x45=69
+        0x91, 0x01, 0x09, 'T', 0x02, 'e', 'n',            // Record 1 header (MB=1, ME=0)
+        'm', 'a', 'r', '0', '0', '4',                     // Record 1 payload: "mar004"
+        0x51, 0x01, 0x34, 'U', 0x04,                      // Record 2 header (URI, truncated)
+        'r', 'a', 's', 'p', 'b', 'e', 'r', 'r'            // Record 2 payload (truncated)
+    };
+    String result = hal::parseNDEFText(buf, 32, 0x00);
+    TEST_ASSERT_EQUAL_STRING("mar004", result.c_str());
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────
 
 int main(int argc, char** argv) {
@@ -274,6 +293,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_wrong_type_not_T_returns_empty);
     RUN_TEST(test_ndef_message_too_short);
     RUN_TEST(test_malformed_record_returns_empty_cleanly);
+    RUN_TEST(test_multi_record_first_text_extractable);
 
     return UNITY_END();
 }

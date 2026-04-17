@@ -81,17 +81,24 @@ inline String parseNDEFText(const uint8_t* pages3to10, size_t len, uint8_t sak) 
         return "";
     }
 
+    // Clamp declared NDEF length to what we actually have. Tokens with
+    // multi-record NDEF messages (e.g., a Text record carrying the tokenId
+    // followed by a URI record) may declare a total TLV length that extends
+    // beyond pages 3..10. The first record — the Text record we care about —
+    // still fits in the buffer and is extractable.
+    int effectiveLen = ndefLength;
     if (ndefStart + ndefLength > (int)len) {
-        LOG_NDEF("[NDEF-PARSE] FAILED: NDEF message exceeds buffer\n");
-        return "";
+        effectiveLen = (int)len - ndefStart;
+        LOG_NDEF("[NDEF-PARSE] Truncating NDEF: declared=%d bytes, available=%d bytes\n",
+                 ndefLength, effectiveLen);
     }
 
-    // NDEF message lives at pages3to10[ndefStart..ndefStart+ndefLength]
+    // NDEF message lives at pages3to10[ndefStart..ndefStart+effectiveLen]
     const uint8_t* msg = &pages3to10[ndefStart];
 
-    // Parse NDEF record
-    if (ndefLength < 7) {
-        LOG_NDEF("[NDEF-PARSE] FAILED: NDEF message too short (%d bytes)\n", ndefLength);
+    // Parse NDEF record (first record only — sufficient for tokenId extraction)
+    if (effectiveLen < 7) {
+        LOG_NDEF("[NDEF-PARSE] FAILED: NDEF message too short (%d bytes)\n", effectiveLen);
         return "";
     }
 
@@ -116,8 +123,8 @@ inline String parseNDEFText(const uint8_t* pages3to10, size_t len, uint8_t sak) 
     int textStart = 5 + langCodeLen;
     int textLength = payloadLength - 1 - langCodeLen;
 
-    if (textLength <= 0 || textStart + textLength > ndefLength) {
-        LOG_NDEF("[NDEF-PARSE] FAILED: text bounds invalid (start=%d, len=%d, ndefLen=%d)\n", textStart, textLength, ndefLength);
+    if (textLength <= 0 || textStart + textLength > effectiveLen) {
+        LOG_NDEF("[NDEF-PARSE] FAILED: text bounds invalid (start=%d, len=%d, effLen=%d)\n", textStart, textLength, effectiveLen);
         return "";
     }
 
