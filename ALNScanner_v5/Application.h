@@ -559,17 +559,63 @@ inline void Application::processRFIDScan() {
 // ═══════════════════════════════════════════════════════════════════════
 
 /**
- * generateTimestamp() - Create ISO 8601-ish timestamp
+ * generateTimestamp() - Create ISO 8601 timestamp in local time with offset
  *
- * Extracted from v4.1 lines 1260-1272
+ * Uses the system real-time clock (set via SNTP after WiFi connects) and
+ * the active POSIX TZ (applied from the orchestrator's /health response).
+ * Rendered in local time with an explicit offset suffix so the timestamp
+ * is timezone-unambiguous and matches the backend host's wall clock.
  *
- * Uses millis() since device doesn't have RTC.
- * Format: "1970-01-01THH:MM:SS.mmmZ"
+ * Format (NTP synced): "YYYY-MM-DDTHH:MM:SS.mmm±HH:MM"
+ *   e.g., "2026-04-16T23:16:23.853-07:00"
  *
- * Note: This is a placeholder timestamp. The orchestrator should use
- * server-side time for actual event logging.
+ * Format (pre-NTP-sync): "1970-01-01THH:MM:SS.mmmZ"
+ *   Uptime-based placeholder — backend can identify un-synced scans by
+ *   the 1970 prefix.
  */
 inline String Application::generateTimestamp() {
+    time_t now = time(nullptr);
+    // Epoch threshold: any value above this is plausibly a real timestamp
+    // (2023-11-14 — well before any conceivable deployment date). Anything
+    // below means SNTP hasn't populated the system clock yet.
+    constexpr time_t NTP_SYNCED_THRESHOLD = 1700000000;
+
+    if (now >= NTP_SYNCED_THRESHOLD) {
+        struct tm tm_local, tm_utc;
+        localtime_r(&now, &tm_local);
+        gmtime_r(&now, &tm_utc);
+
+        // Use ms-within-current-second to preserve sub-second ordering of
+        // back-to-back scans without pulling in gettimeofday().
+        unsigned long ms = millis() % 1000;
+
+        // Compute offset from UTC by differencing local and UTC components
+        // of the same instant. tm_gmtoff would be cleaner but isn't part
+        // of the C standard and is unavailable in ESP32's newlib.
+        long local_s = tm_local.tm_hour * 3600L + tm_local.tm_min * 60 + tm_local.tm_sec;
+        long utc_s   = tm_utc.tm_hour   * 3600L + tm_utc.tm_min   * 60 + tm_utc.tm_sec;
+        long off = local_s - utc_s;
+        // Handle day-boundary crossings (e.g., local Apr 16 23:00 vs UTC Apr 17 06:00)
+        long local_yd = (long)tm_local.tm_year * 366 + tm_local.tm_yday;
+        long utc_yd   = (long)tm_utc.tm_year   * 366 + tm_utc.tm_yday;
+        if (local_yd > utc_yd)      off += 86400;
+        else if (local_yd < utc_yd) off -= 86400;
+
+        char sign = (off < 0) ? '-' : '+';
+        long off_abs = (off < 0) ? -off : off;
+        int off_hr = off_abs / 3600;
+        int off_min = (off_abs % 3600) / 60;
+
+        char timestamp[36];
+        snprintf(timestamp, sizeof(timestamp),
+            "%04d-%02d-%02dT%02d:%02d:%02d.%03lu%c%02d:%02d",
+            tm_local.tm_year + 1900, tm_local.tm_mon + 1, tm_local.tm_mday,
+            tm_local.tm_hour, tm_local.tm_min, tm_local.tm_sec, ms,
+            sign, off_hr, off_min);
+        return String(timestamp);
+    }
+
+    // Pre-sync fallback: uptime-based placeholder under 1970 epoch.
     unsigned long ms = millis();
     unsigned long seconds = ms / 1000;
     unsigned long minutes = seconds / 60;
@@ -579,7 +625,6 @@ inline String Application::generateTimestamp() {
     snprintf(timestamp, sizeof(timestamp),
         "1970-01-01T%02lu:%02lu:%02lu.%03luZ",
         hours % 24, minutes % 60, seconds % 60, ms % 1000);
-
     return String(timestamp);
 }
 
