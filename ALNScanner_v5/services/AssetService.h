@@ -40,8 +40,8 @@ namespace services {
 class AssetService {
 public:
     struct ProgressInfo {
-        const char* tokenId;
-        const char* type;      // "image" or "audio"
+        String tokenId;
+        String type;           // "image" or "audio"
         int fileIndex;         // 1-based
         int fileCount;         // total files in this sync
         size_t bytesDone;      // current file
@@ -145,10 +145,7 @@ public:
             Serial.printf("[ASSET-SVC] (%d/%d) %s %s\n",
                           i + 1, total, p.type.c_str(), p.tokenId.c_str());
 
-            ProgressInfo info = {
-                p.tokenId.c_str(), p.type.c_str(),
-                i + 1, total, 0, p.size
-            };
+            ProgressInfo info{p.tokenId, p.type, i + 1, total, 0, p.size};
             if (_onProgress) _onProgress(info);
 
             auto streamProgress = [&](size_t done, size_t totalBytes) {
@@ -220,7 +217,7 @@ private:
                                freertos_config::SD_MUTEX_TIMEOUT_MS);
         if (!lock.acquired()) return;
 
-        if (SD.exists(paths::MANIFEST_TEMP_FILE)) SD.remove(paths::MANIFEST_TEMP_FILE);
+        SD.remove(paths::MANIFEST_TEMP_FILE); // no-op if absent
         File f = SD.open(paths::MANIFEST_TEMP_FILE, FILE_WRITE);
         if (!f) {
             Serial.println("[ASSET-SVC] Could not open manifest tmp for write");
@@ -230,7 +227,7 @@ private:
         f.flush();
         f.close();
 
-        if (SD.exists(paths::MANIFEST_FILE)) SD.remove(paths::MANIFEST_FILE);
+        SD.remove(paths::MANIFEST_FILE);
         if (!SD.rename(paths::MANIFEST_TEMP_FILE, paths::MANIFEST_FILE)) {
             Serial.println("[ASSET-SVC] Manifest rename failed");
         }
@@ -278,7 +275,7 @@ private:
         for (const auto& tokenId : toRemove) {
             const char* extStr = section[tokenId]["ext"] | "";
             String destPath = _buildPath(type, tokenId, extStr);
-            if (SD.exists(destPath.c_str())) SD.remove(destPath.c_str());
+            SD.remove(destPath.c_str()); // no-op if absent
             section.remove(tokenId);
             Serial.printf("[ASSET-SVC] Pruned orphan %s %s\n", type, tokenId.c_str());
         }

@@ -911,18 +911,24 @@ inline bool Application::initializeServices() {
         tft.println("Syncing assets...");
         int16_t progressRow = tft.getCursorY();
 
+        // Guard redraws by (fileIndex, integer-percent): the streaming
+        // download fires progress per 4 KB chunk, which would otherwise
+        // produce thousands of redundant TFT writes per sync.
+        int lastFileIdx = -1;
+        int lastPct = -1;
         auto& assets = services::AssetService::getInstance();
         assets.setProgressCallback(
-            [&tft, progressRow](const services::AssetService::ProgressInfo& p) {
-                // Overwrite a single status row each update to avoid scrolling
-                // the boot log off screen.
+            [&tft, progressRow, &lastFileIdx, &lastPct](const services::AssetService::ProgressInfo& p) {
+                int pct = p.bytesTotal > 0
+                    ? (int)((p.bytesDone * 100) / p.bytesTotal) : 0;
+                if (p.fileIndex == lastFileIdx && pct == lastPct) return;
+                lastFileIdx = p.fileIndex;
+                lastPct = pct;
                 tft.fillRect(0, progressRow, 240, 16, 0x0000);
                 tft.setCursor(0, progressRow);
                 tft.setTextColor(0xFFFF);
-                int pct = p.bytesTotal > 0
-                    ? (int)((p.bytesDone * 100) / p.bytesTotal) : 0;
                 tft.printf("%s %d/%d %d%%\n",
-                           p.type, p.fileIndex, p.fileCount, pct);
+                           p.type.c_str(), p.fileIndex, p.fileCount, pct);
             });
 
         if (assets.syncFromOrchestrator(config.getConfig().orchestratorURL, orchestrator)) {

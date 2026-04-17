@@ -718,10 +718,8 @@ public:
             SD.mkdir(dir.c_str()); // no-op if already present
         }
 
-        // Remove any leftover .part from a prior aborted download.
-        if (SD.exists(partPath.c_str())) {
-            SD.remove(partPath.c_str());
-        }
+        // Clear any leftover .part from a prior aborted download.
+        SD.remove(partPath.c_str()); // no-op if absent
 
         File f = SD.open(partPath.c_str(), FILE_WRITE);
         if (!f) {
@@ -795,7 +793,7 @@ public:
         }
 
         // Atomic swap into the final name.
-        if (SD.exists(destPath.c_str())) SD.remove(destPath.c_str());
+        SD.remove(destPath.c_str()); // no-op if absent
         if (!SD.rename(partPath.c_str(), destPath.c_str())) {
             Serial.printf("[ORCH] STREAM: rename failed %s -> %s\n",
                           partPath.c_str(), destPath.c_str());
