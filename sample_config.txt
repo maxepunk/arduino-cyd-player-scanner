@@ -35,6 +35,17 @@ TEAM_ID=001
 # Set to false to use cached tokens.json (saves ~2-5 seconds on boot)
 SYNC_TOKENS=true
 
+# ─── Asset Synchronization (OPTIONAL) ───────────────────────────
+# Sync BMP images and audio files from the orchestrator at boot.
+# Options: true, false (default: true)
+#
+# On first boot with a blank SD card, this downloads every game asset
+# (~30-40 MB over HTTPS); subsequent boots only re-download what changed
+# since last sync (tracked via SHA-1 in /assets/manifest.json). Set to
+# false to skip asset sync entirely (scanner will use whatever is already
+# on the SD card and fall back to placeholder.bmp for missing items).
+SYNC_ASSETS=true
+
 # ─── Debug Mode (OPTIONAL) ──────────────────────────────────────
 # Control RFID initialization behavior
 # Options: true, false (default: false)

@@ -29,6 +29,9 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <SD.h>
+#include <mbedtls/sha1.h>
+#include <functional>
 #include <vector>
 #include "../models/Config.h"
 #include "../models/Token.h"
@@ -623,6 +626,184 @@ public:
         }, operation);
         responseBody = resp.body;
         return resp.code;
+    }
+
+    /**
+     * @brief Streaming GET that writes the response body directly to an SD
+     *        card path, computing SHA-1 on the fly and verifying against the
+     *        manifest-provided values. The HTTP body is never buffered in
+     *        RAM — required because game assets (~230 KB BMPs) would OOM a
+     *        String-based read.
+     *
+     * Writes to `<destPath>.part` first and renames on success, so a
+     * partial download can never be mistaken for a valid file. Uses a fresh
+     * WiFiClientSecure per call (see OrchestratorService heap-corruption
+     * notes). Holds the SD mutex for the entire download (safe at boot —
+     * the background upload task has no scans to process yet).
+     *
+     * Uses HTTP/1.0 (via HTTPClient::useHTTP10) to avoid chunked transfer
+     * encoding; our static-file endpoint always serves with Content-Length
+     * so this is the simplest correct path. Handshakes are not reused
+     * across calls (fresh client-per-request pattern precludes
+     * setReuse()).
+     *
+     * @param url          Full URL, must be https:// on the configured
+     *                     orchestrator port.
+     * @param destPath     Final SD path to receive the file.
+     * @param expectedSize Expected payload size; mismatch → failure.
+     * @param expectedSha1 Expected lowercase 40-char hex; mismatch → failure.
+     * @param timeoutMs    Overall connect+read timeout.
+     * @param onProgress   Optional progress callback invoked every chunk.
+     * @return true only on byte-perfect success.
+     */
+    bool httpGETStreamToSD(
+        const String& url,
+        const String& destPath,
+        size_t expectedSize,
+        const String& expectedSha1,
+        uint32_t timeoutMs,
+        std::function<void(size_t, size_t)> onProgress = nullptr
+    ) {
+        const uint32_t heapBefore = ESP.getFreeHeap();
+        if (heapBefore < limits::ASSET_MIN_FREE_HEAP) {
+            Serial.printf("[ORCH] STREAM: abort, low heap %u < %d\n",
+                          heapBefore, limits::ASSET_MIN_FREE_HEAP);
+            return false;
+        }
+
+        String partPath = destPath + paths::PART_SUFFIX;
+
+        // Fresh HTTPS context per download (heap-corruption mitigation, same
+        // as httpGET / httpPOST in HTTPHelper above).
+        HTTPClient client;
+        WiFiClientSecure secureClient;
+        if (url.startsWith("https://")) {
+            secureClient.setInsecure();
+            client.begin(secureClient, url);
+        } else {
+            client.begin(url);
+        }
+        client.setTimeout(timeoutMs);
+        client.useHTTP10(true); // disable chunked transfer-encoding
+
+        int code = client.GET();
+        if (code != 200) {
+            Serial.printf("[ORCH] STREAM: HTTP %d for %s\n", code, url.c_str());
+            client.end();
+            return false;
+        }
+
+        int contentLen = client.getSize();
+        if (contentLen > 0 && (size_t)contentLen != expectedSize) {
+            Serial.printf("[ORCH] STREAM: size mismatch %d != %u\n",
+                          contentLen, (unsigned)expectedSize);
+            client.end();
+            return false;
+        }
+
+        // SD mutex held for the whole download. Safe pre-game: the scan
+        // upload task has nothing to upload yet.
+        hal::SDCard::Lock lock("OrchestratorService::stream",
+                               freertos_config::SD_MUTEX_LONG_TIMEOUT_MS);
+        if (!lock.acquired()) {
+            Serial.println("[ORCH] STREAM: SD lock failed");
+            client.end();
+            return false;
+        }
+
+        // Ensure the parent directory exists (first-boot path).
+        int lastSlash = destPath.lastIndexOf('/');
+        if (lastSlash > 0) {
+            String dir = destPath.substring(0, lastSlash);
+            SD.mkdir(dir.c_str()); // no-op if already present
+        }
+
+        // Remove any leftover .part from a prior aborted download.
+        if (SD.exists(partPath.c_str())) {
+            SD.remove(partPath.c_str());
+        }
+
+        File f = SD.open(partPath.c_str(), FILE_WRITE);
+        if (!f) {
+            Serial.printf("[ORCH] STREAM: could not open %s\n", partPath.c_str());
+            client.end();
+            return false;
+        }
+
+        mbedtls_sha1_context shaCtx;
+        mbedtls_sha1_init(&shaCtx);
+        mbedtls_sha1_starts_ret(&shaCtx);
+
+        WiFiClient* stream = client.getStreamPtr();
+        uint8_t buffer[limits::ASSET_DOWNLOAD_CHUNK_SIZE];
+        size_t totalRead = 0;
+        bool ok = true;
+
+        // Read until we've consumed the whole body. Break on connection
+        // close once we either have the expected size or the server just
+        // stops sending.
+        while (client.connected() && (contentLen <= 0 || (size_t)contentLen > totalRead)) {
+            size_t avail = stream->available();
+            if (avail == 0) {
+                delay(5);
+                continue;
+            }
+            size_t toRead = avail > sizeof(buffer) ? sizeof(buffer) : avail;
+            int n = stream->readBytes(buffer, toRead);
+            if (n <= 0) break;
+
+            size_t written = f.write(buffer, n);
+            if (written != (size_t)n) {
+                Serial.printf("[ORCH] STREAM: SD write short %u/%d\n",
+                              (unsigned)written, n);
+                ok = false;
+                break;
+            }
+            mbedtls_sha1_update_ret(&shaCtx, buffer, n);
+            totalRead += n;
+
+            if (onProgress) onProgress(totalRead, expectedSize);
+            yield(); // WDT + cooperative scheduling
+        }
+
+        f.flush();
+        f.close();
+
+        unsigned char digest[20];
+        mbedtls_sha1_finish_ret(&shaCtx, digest);
+        mbedtls_sha1_free(&shaCtx);
+        client.end();
+
+        if (!ok || totalRead != expectedSize) {
+            Serial.printf("[ORCH] STREAM: short read %u/%u\n",
+                          (unsigned)totalRead, (unsigned)expectedSize);
+            SD.remove(partPath.c_str());
+            return false;
+        }
+
+        // Hex-encode digest for manifest comparison.
+        char hex[41];
+        for (int i = 0; i < 20; i++) {
+            snprintf(&hex[i * 2], 3, "%02x", digest[i]);
+        }
+        hex[40] = '\0';
+        if (expectedSha1.length() != 40 || expectedSha1 != hex) {
+            Serial.printf("[ORCH] STREAM: sha1 mismatch got=%s want=%s\n",
+                          hex, expectedSha1.c_str());
+            SD.remove(partPath.c_str());
+            return false;
+        }
+
+        // Atomic swap into the final name.
+        if (SD.exists(destPath.c_str())) SD.remove(destPath.c_str());
+        if (!SD.rename(partPath.c_str(), destPath.c_str())) {
+            Serial.printf("[ORCH] STREAM: rename failed %s -> %s\n",
+                          partPath.c_str(), destPath.c_str());
+            SD.remove(partPath.c_str());
+            return false;
+        }
+
+        return true;
     }
 
 private:
