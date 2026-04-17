@@ -36,6 +36,7 @@
 #include "hal/SDCard.h"
 #include "services/ConfigService.h"
 #include "services/TokenService.h"
+#include "services/AssetService.h"
 #include "services/OrchestratorService.h"
 #include "services/SerialService.h"
 #include "ui/UIStateMachine.h"
@@ -898,6 +899,51 @@ inline bool Application::initializeServices() {
 
     display.getTFT().setTextColor(0x07E0);  // Green
     display.getTFT().printf("Loaded: %d tokens\n", tokens.getCount());
+
+    // Asset sync (BMPs + audio) — runs after token sync so the remote
+    // manifest is authoritative and we only ever hit the network once per
+    // boot. Progress is rendered to the TFT so the operator can see the
+    // (possibly multi-minute) first-time sync make progress.
+    if (config.getConfig().syncAssets && orchestrator.getState() == models::ORCH_CONNECTED) {
+        LOG_INFO("[INIT] Syncing assets from orchestrator...\n");
+        auto& tft = display.getTFT();
+        tft.setTextColor(0xFFFF);
+        tft.println("Syncing assets...");
+        int16_t progressRow = tft.getCursorY();
+
+        // Guard redraws by (fileIndex, integer-percent): the streaming
+        // download fires progress per 4 KB chunk, which would otherwise
+        // produce thousands of redundant TFT writes per sync.
+        int lastFileIdx = -1;
+        int lastPct = -1;
+        auto& assets = services::AssetService::getInstance();
+        assets.setProgressCallback(
+            [&tft, progressRow, &lastFileIdx, &lastPct](const services::AssetService::ProgressInfo& p) {
+                int pct = p.bytesTotal > 0
+                    ? (int)((p.bytesDone * 100) / p.bytesTotal) : 0;
+                if (p.fileIndex == lastFileIdx && pct == lastPct) return;
+                lastFileIdx = p.fileIndex;
+                lastPct = pct;
+                tft.fillRect(0, progressRow, 240, 16, 0x0000);
+                tft.setCursor(0, progressRow);
+                tft.setTextColor(0xFFFF);
+                tft.printf("%s %d/%d %d%%\n",
+                           p.type.c_str(), p.fileIndex, p.fileCount, pct);
+            });
+
+        if (assets.syncFromOrchestrator(config.getConfig().orchestratorURL, orchestrator)) {
+            tft.setTextColor(0x07E0);  // Green
+            tft.println("Assets: Synced");
+        } else {
+            tft.setTextColor(0xFD20);  // Orange
+            tft.println("Assets: Partial");
+        }
+        assets.setProgressCallback(nullptr);
+    } else {
+        LOG_INFO("[INIT] Skipping asset sync (disabled or offline)\n");
+        display.getTFT().setTextColor(0xFD20);
+        display.getTFT().println("Assets: Cached");
+    }
 
     // Serial service ready (command registration done separately)
     LOG_INFO("[INIT] ✓ Serial service ready\n");

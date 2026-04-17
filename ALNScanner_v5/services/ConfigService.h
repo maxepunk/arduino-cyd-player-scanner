@@ -163,6 +163,10 @@ public:
                 _config.syncTokens = !(value.equalsIgnoreCase("false") || value == "0");
                 LOG_DEBUG("[CONFIG]       SYNC_TOKENS set to %s\n", _config.syncTokens ? "TRUE" : "FALSE");
                 parsedKeys++;
+            } else if (key == "SYNC_ASSETS") {
+                _config.syncAssets = !(value.equalsIgnoreCase("false") || value == "0");
+                LOG_DEBUG("[CONFIG]       SYNC_ASSETS set to %s\n", _config.syncAssets ? "TRUE" : "FALSE");
+                parsedKeys++;
             } else if (key == "DEBUG_MODE") {
                 _config.debugMode = !(value.equalsIgnoreCase("false") || value == "0");
                 LOG_DEBUG("[CONFIG]       DEBUG_MODE set to %s\n", _config.debugMode ? "TRUE" : "FALSE");
@@ -182,6 +186,7 @@ public:
         LOG_INFO("  TEAM_ID: %s\n", _config.teamID.length() > 0 ? _config.teamID.c_str() : "(not set)");
         LOG_INFO("  DEVICE_ID: %s\n", _config.deviceID.length() > 0 ? _config.deviceID.c_str() : "(auto-generate)");
         LOG_INFO("  SYNC_TOKENS: %s\n", _config.syncTokens ? "true" : "false");
+        LOG_INFO("  SYNC_ASSETS: %s\n", _config.syncAssets ? "true" : "false");
         LOG_INFO("  DEBUG_MODE: %s\n", _config.debugMode ? "true" : "false");
         LOG_INFO("[CONFIG] Free heap after parsing: %d bytes\n", ESP.getFreeHeap());
 
@@ -247,6 +252,7 @@ public:
         }
 
         file.printf("SYNC_TOKENS=%s\n", _config.syncTokens ? "true" : "false");
+        file.printf("SYNC_ASSETS=%s\n", _config.syncAssets ? "true" : "false");
         file.printf("DEBUG_MODE=%s\n", _config.debugMode ? "true" : "false");
 
         file.flush();
@@ -284,6 +290,9 @@ public:
             return true;
         } else if (key == "SYNC_TOKENS") {
             _config.syncTokens = !(value.equalsIgnoreCase("false") || value == "0");
+            return true;
+        } else if (key == "SYNC_ASSETS") {
+            _config.syncAssets = !(value.equalsIgnoreCase("false") || value == "0");
             return true;
         } else if (key == "DEBUG_MODE") {
             _config.debugMode = !(value.equalsIgnoreCase("false") || value == "0");
@@ -396,8 +405,9 @@ public:
             }
         }
 
-        // SYNC_TOKENS and DEBUG_MODE are always valid (boolean)
+        // SYNC_TOKENS, SYNC_ASSETS and DEBUG_MODE are always valid (boolean)
         LOG_DEBUG("[VALIDATE] + SYNC_TOKENS valid: %s\n", _config.syncTokens ? "true" : "false");
+        LOG_DEBUG("[VALIDATE] + SYNC_ASSETS valid: %s\n", _config.syncAssets ? "true" : "false");
         LOG_DEBUG("[VALIDATE] + DEBUG_MODE valid: %s\n", _config.debugMode ? "true" : "false");
 
         if (isValid) {
