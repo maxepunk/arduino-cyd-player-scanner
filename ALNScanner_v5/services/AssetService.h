@@ -81,11 +81,11 @@ public:
      * Returns true if every queued file succeeded.
      */
     bool syncFromOrchestrator(const String& orchestratorURL, OrchestratorService& orch) {
-        Serial.println("\n[ASSET-SVC] >>> ASSET SYNC START <<<");
-        Serial.printf("[ASSET-SVC] Free heap: %d bytes\n", ESP.getFreeHeap());
+        LOG_INFO("\n[ASSET-SVC] >>> ASSET SYNC START <<<\n");
+        LOG_INFO("[ASSET-SVC] Free heap: %d bytes\n", ESP.getFreeHeap());
 
         if (orchestratorURL.length() == 0) {
-            Serial.println("[ASSET-SVC] Orchestrator URL not set, skipping.");
+            LOG_INFO("[ASSET-SVC] Orchestrator URL not set, skipping.\n");
             return false;
         }
 
@@ -95,12 +95,12 @@ public:
         int code = orch.httpGETWithRetry(
             orchestratorURL + "/api/assets/manifest", 15000, "asset manifest fetch", body);
         if (code != 200) {
-            Serial.printf("[ASSET-SVC] Manifest fetch failed (HTTP %d). Aborting.\n", code);
+            LOG_INFO("[ASSET-SVC] Manifest fetch failed (HTTP %d). Aborting.\n", code);
             return false;
         }
         if ((int)body.length() > limits::MAX_MANIFEST_SIZE) {
-            Serial.printf("[ASSET-SVC] Manifest too large (%u > %d)\n",
-                          body.length(), limits::MAX_MANIFEST_SIZE);
+            LOG_INFO("[ASSET-SVC] Manifest too large (%u > %d)\n",
+                     body.length(), limits::MAX_MANIFEST_SIZE);
             return false;
         }
 
@@ -108,19 +108,19 @@ public:
         // TLS + HTTP + download headroom (~48 KB).
         const size_t neededHeap = (limits::MANIFEST_DOC_SIZE * 2) + 49152;
         if (ESP.getFreeHeap() < neededHeap) {
-            Serial.printf("[ASSET-SVC] Aborting: heap %u < required %u\n",
-                          ESP.getFreeHeap(), (unsigned)neededHeap);
+            LOG_INFO("[ASSET-SVC] Aborting: heap %u < required %u\n",
+                     ESP.getFreeHeap(), (unsigned)neededHeap);
             return false;
         }
 
         DynamicJsonDocument remoteDoc(limits::MANIFEST_DOC_SIZE);
         DeserializationError err = deserializeJson(remoteDoc, body);
         if (err) {
-            Serial.printf("[ASSET-SVC] Manifest parse failed: %s\n", err.c_str());
+            LOG_INFO("[ASSET-SVC] Manifest parse failed: %s\n", err.c_str());
             if (err == DeserializationError::NoMemory) {
-                Serial.printf("[ASSET-SVC] Manifest doc (%d B) too small for payload (%u B). "
-                              "Bump limits::MANIFEST_DOC_SIZE.\n",
-                              limits::MANIFEST_DOC_SIZE, body.length());
+                LOG_INFO("[ASSET-SVC] Manifest doc (%d B) too small for payload (%u B). "
+                         "Bump limits::MANIFEST_DOC_SIZE.\n",
+                         limits::MANIFEST_DOC_SIZE, body.length());
             }
             return false;
         }
@@ -138,8 +138,8 @@ public:
         // exercise it without SD/WiFi deps.
         std::vector<manifest::Pending> pending = manifest::diff(remoteDoc, localDoc);
 
-        Serial.printf("[ASSET-SVC] Queue: %u file(s) to download\n",
-                      (unsigned)pending.size());
+        LOG_INFO("[ASSET-SVC] Queue: %u file(s) to download\n",
+                 (unsigned)pending.size());
 
         // Step 4: download each queued file; commit local manifest on
         // each success so the next boot resumes from wherever we stopped.
@@ -153,8 +153,8 @@ public:
                          (p.type == "image" ? "images" : "audio") + "/" +
                          p.tokenId + "." + (p.type == "image" ? "bmp" : p.ext);
 
-            Serial.printf("[ASSET-SVC] (%d/%d) %s %s\n",
-                          i + 1, total, p.type.c_str(), p.tokenId.c_str());
+            LOG_DEBUG("[ASSET-SVC] (%d/%d) %s %s\n",
+                      i + 1, total, p.type.c_str(), p.tokenId.c_str());
 
             ProgressInfo info{p.tokenId, p.type, i + 1, total, 0, p.size};
             if (_onProgress) _onProgress(info);
@@ -187,8 +187,8 @@ public:
         // the SD file and the local manifest entry.
         int prunedCount = _pruneOrphans(remoteDoc, localDoc);
 
-        Serial.printf("[ASSET-SVC] <<< ASSET SYNC END: %d ok, %d fail, %d pruned >>>\n\n",
-                      successCount, failCount, prunedCount);
+        LOG_INFO("[ASSET-SVC] <<< ASSET SYNC END: %d ok, %d fail, %d pruned >>>\n\n",
+                 successCount, failCount, prunedCount);
         return failCount == 0;
     }
 
@@ -207,7 +207,7 @@ private:
         if (!lock.acquired()) return;
 
         if (!SD.exists(paths::MANIFEST_FILE)) {
-            Serial.println("[ASSET-SVC] No local manifest yet (first sync).");
+            LOG_DEBUG("[ASSET-SVC] No local manifest yet (first sync).\n");
             return;
         }
         File f = SD.open(paths::MANIFEST_FILE, FILE_READ);
@@ -215,8 +215,8 @@ private:
         DeserializationError err = deserializeJson(doc, f);
         f.close();
         if (err) {
-            Serial.printf("[ASSET-SVC] Local manifest corrupt (%s), treating as empty.\n",
-                          err.c_str());
+            LOG_INFO("[ASSET-SVC] Local manifest corrupt (%s), treating as empty.\n",
+                     err.c_str());
             doc.clear();
         }
     }
@@ -231,7 +231,7 @@ private:
         SD.remove(paths::MANIFEST_TEMP_FILE); // no-op if absent
         File f = SD.open(paths::MANIFEST_TEMP_FILE, FILE_WRITE);
         if (!f) {
-            Serial.println("[ASSET-SVC] Could not open manifest tmp for write");
+            LOG_INFO("[ASSET-SVC] Could not open manifest tmp for write\n");
             return;
         }
         serializeJson(doc, f);
@@ -240,7 +240,7 @@ private:
 
         SD.remove(paths::MANIFEST_FILE);
         if (!SD.rename(paths::MANIFEST_TEMP_FILE, paths::MANIFEST_FILE)) {
-            Serial.println("[ASSET-SVC] Manifest rename failed");
+            LOG_INFO("[ASSET-SVC] Manifest rename failed\n");
         }
     }
 
@@ -273,7 +273,7 @@ private:
             String destPath = _buildPath(type, tokenId, extStr);
             SD.remove(destPath.c_str()); // no-op if absent
             section.remove(tokenId);
-            Serial.printf("[ASSET-SVC] Pruned orphan %s %s\n", type, tokenId.c_str());
+            LOG_DEBUG("[ASSET-SVC] Pruned orphan %s %s\n", type, tokenId.c_str());
         }
         return (int)toRemove.size();
     }
