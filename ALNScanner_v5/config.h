@@ -88,14 +88,23 @@ namespace paths {
 namespace limits {
     constexpr int MAX_TOKENS = 50;
     constexpr int MAX_TOKEN_DB_SIZE = 50000; // 50KB
-    // Asset manifest is ~(images+audio) * 80 bytes + overhead. 128 KB gives
-    // ~1500 entries of headroom before we need a different transport.
+    // Wire-format ceiling for the manifest payload. Device refuses anything
+    // larger to avoid pathological-input OOM. Tied to the parent CLAUDE.md
+    // "ESP32 Asset Sync Issues" debug step #5.
     constexpr int MAX_MANIFEST_SIZE = 131072; // 128KB
+
+    // Heap budget for parsed JsonDocument. 64KB covers ~600 entries at the
+    // observed ~80 bytes/entry; if a future manifest grows past this we abort
+    // with a diagnostic rather than risk OOM. Two docs (remote+local) are
+    // live during diff, so total live heap = 2 * MANIFEST_DOC_SIZE.
+    constexpr int MANIFEST_DOC_SIZE = 65536; // 64KB
     // Streaming download buffer sized to balance TCP window utilization
     // against heap pressure (TLS session ~22 KB, file I/O overhead, SHA
     // context). 4 KB chunks are the standard Espressif streaming example.
     constexpr int ASSET_DOWNLOAD_CHUNK_SIZE = 4096;
-    constexpr int ASSET_MIN_FREE_HEAP = 40960; // 40KB abort threshold
+    // Per-file streaming abort threshold used by httpGETStreamToSD;
+    // separate from the manifest-parse pre-flight in AssetService.
+    constexpr int ASSET_MIN_FREE_HEAP = 40960; // 40KB
     constexpr int MAX_DEVICE_ID_LENGTH = 100;
     constexpr int TEAM_ID_LENGTH = 3;
     constexpr int MAX_SSID_LENGTH = 32;

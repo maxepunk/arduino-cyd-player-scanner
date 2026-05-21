@@ -104,20 +104,31 @@ public:
             return false;
         }
 
-        // ArduinoJson DynamicJsonDocument sized for the manifest payload
-        // plus the copy overhead (roughly 2x for duplicated keys + tree
-        // nodes). If this ever pressures heap, move to stream-parsing.
-        DynamicJsonDocument remoteDoc(limits::MAX_MANIFEST_SIZE * 2);
+        // Pre-flight heap budget: 2 * MANIFEST_DOC_SIZE for remote+local, plus
+        // TLS + HTTP + download headroom (~48 KB).
+        const size_t neededHeap = (limits::MANIFEST_DOC_SIZE * 2) + 49152;
+        if (ESP.getFreeHeap() < neededHeap) {
+            Serial.printf("[ASSET-SVC] Aborting: heap %u < required %u\n",
+                          ESP.getFreeHeap(), (unsigned)neededHeap);
+            return false;
+        }
+
+        DynamicJsonDocument remoteDoc(limits::MANIFEST_DOC_SIZE);
         DeserializationError err = deserializeJson(remoteDoc, body);
         if (err) {
             Serial.printf("[ASSET-SVC] Manifest parse failed: %s\n", err.c_str());
+            if (err == DeserializationError::NoMemory) {
+                Serial.printf("[ASSET-SVC] Manifest doc (%d B) too small for payload (%u B). "
+                              "Bump limits::MANIFEST_DOC_SIZE.\n",
+                              limits::MANIFEST_DOC_SIZE, body.length());
+            }
             return false;
         }
         body = String(); // free the buffered copy ASAP
 
         // Step 2: read whatever local manifest already exists. Missing or
         // corrupt = empty, which forces a full re-sync.
-        DynamicJsonDocument localDoc(limits::MAX_MANIFEST_SIZE * 2);
+        DynamicJsonDocument localDoc(limits::MANIFEST_DOC_SIZE);
         _loadLocalManifest(localDoc);
 
         // Step 3: build the download queue. We flatten both asset types
