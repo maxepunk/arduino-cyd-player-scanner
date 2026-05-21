@@ -139,6 +139,64 @@ void test_buildPath_audio_defaults_to_wav_when_ext_missing() {
     TEST_ASSERT_EQUAL_STRING("/assets/audio/asm031.wav", p.c_str());
 }
 
+// ─── updateEntry(): upsert semantics, no duplicate keys ──────────────
+
+void test_updateEntry_first_insert_creates_entry() {
+    DynamicJsonDocument local(2048);
+    services::manifest::updateEntry(
+        local, "image", "kaa001",
+        "1111111111111111111111111111111111111111", 1000, nullptr);
+
+    JsonObject images = local["images"].as<JsonObject>();
+    TEST_ASSERT_EQUAL(1, (int)images.size());
+    TEST_ASSERT_EQUAL_STRING(
+        "1111111111111111111111111111111111111111",
+        images["kaa001"]["sha1"].as<const char*>());
+}
+
+void test_updateEntry_repeated_calls_do_not_duplicate_keys() {
+    DynamicJsonDocument local(4096);
+
+    services::manifest::updateEntry(
+        local, "image", "kaa001",
+        "1111111111111111111111111111111111111111", 1000, nullptr);
+    services::manifest::updateEntry(
+        local, "image", "kaa001",
+        "2222222222222222222222222222222222222222", 2000, nullptr);
+
+    JsonObject images = local["images"].as<JsonObject>();
+    TEST_ASSERT_EQUAL(1, (int)images.size());
+    TEST_ASSERT_EQUAL_STRING(
+        "2222222222222222222222222222222222222222",
+        images["kaa001"]["sha1"].as<const char*>());
+    TEST_ASSERT_EQUAL(2000, (int)images["kaa001"]["size"].as<int>());
+}
+
+void test_updateEntry_audio_includes_ext() {
+    DynamicJsonDocument local(2048);
+    services::manifest::updateEntry(
+        local, "audio", "asm031",
+        "3333333333333333333333333333333333333333", 5000, "wav");
+
+    TEST_ASSERT_EQUAL_STRING(
+        "wav", local["audio"]["asm031"]["ext"].as<const char*>());
+}
+
+void test_updateEntry_repairs_corrupt_section_type() {
+    DynamicJsonDocument local(2048);
+    local["images"] = "garbage";
+
+    services::manifest::updateEntry(
+        local, "image", "kaa001",
+        "4444444444444444444444444444444444444444", 100, nullptr);
+
+    JsonObject images = local["images"].as<JsonObject>();
+    TEST_ASSERT_EQUAL(1, (int)images.size());
+    TEST_ASSERT_EQUAL_STRING(
+        "4444444444444444444444444444444444444444",
+        images["kaa001"]["sha1"].as<const char*>());
+}
+
 // ─── Unity runner ────────────────────────────────────────────────────
 
 int main(int argc, char** argv) {
@@ -154,5 +212,9 @@ int main(int argc, char** argv) {
     RUN_TEST(test_buildPath_image_uses_bmp_extension);
     RUN_TEST(test_buildPath_audio_uses_provided_ext);
     RUN_TEST(test_buildPath_audio_defaults_to_wav_when_ext_missing);
+    RUN_TEST(test_updateEntry_first_insert_creates_entry);
+    RUN_TEST(test_updateEntry_repeated_calls_do_not_duplicate_keys);
+    RUN_TEST(test_updateEntry_audio_includes_ext);
+    RUN_TEST(test_updateEntry_repairs_corrupt_section_type);
     return UNITY_END();
 }

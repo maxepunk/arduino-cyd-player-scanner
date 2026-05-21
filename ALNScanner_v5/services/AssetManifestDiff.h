@@ -89,5 +89,31 @@ inline String buildPath(const String& type, const String& tokenId, const String&
     return String(paths::AUDIO_DIR) + tokenId + "." + (ext.length() ? ext : String("wav"));
 }
 
+// Insert or upsert an entry in the local manifest doc. `ext` is optional
+// (audio only). Removes any prior entry before creating to avoid the
+// duplicate-key trap (ArduinoJson createNestedObject APPENDS, never
+// upserts). Repairs a corrupt section (existing key with wrong type)
+// by removing and recreating it.
+inline void updateEntry(JsonDocument& local,
+                        const String& type,
+                        const String& tokenId,
+                        const String& sha1,
+                        size_t size,
+                        const char* ext) {
+    const char* section = (type == "image") ? "images" : "audio";
+
+    if (!local[section].is<JsonObject>()) {
+        local.remove(section);
+        local.createNestedObject(section);
+    }
+    JsonObject sectionObj = local[section].as<JsonObject>();
+
+    sectionObj.remove(tokenId);  // critical: prevents duplicate keys
+    JsonObject entry = sectionObj.createNestedObject(tokenId);
+    entry["sha1"] = sha1;
+    entry["size"] = size;
+    if (ext && *ext) entry["ext"] = ext;
+}
+
 } // namespace manifest
 } // namespace services

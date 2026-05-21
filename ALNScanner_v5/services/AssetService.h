@@ -165,8 +165,8 @@ public:
             // Commit this entry to the local manifest immediately. Cheap
             // per-file writes are acceptable here — manifest is small and
             // this is a boot-time operation.
-            _updateLocalEntry(localDoc, p.type, p.tokenId, p.sha1, p.size,
-                              p.type == "audio" ? p.ext.c_str() : nullptr);
+            manifest::updateEntry(localDoc, p.type, p.tokenId, p.sha1, p.size,
+                                  p.type == "audio" ? p.ext.c_str() : nullptr);
             _writeLocalManifestAtomic(localDoc);
             successCount++;
         }
@@ -231,21 +231,6 @@ private:
         if (!SD.rename(paths::MANIFEST_TEMP_FILE, paths::MANIFEST_FILE)) {
             Serial.println("[ASSET-SVC] Manifest rename failed");
         }
-    }
-
-    // Merge a freshly-downloaded entry into the in-memory local doc. Keys
-    // are auto-created; existing entries are overwritten.
-    void _updateLocalEntry(DynamicJsonDocument& local, const String& type,
-                           const String& tokenId, const String& sha1,
-                           size_t size, const char* ext) {
-        const char* section = (type == "image") ? "images" : "audio";
-        JsonObject sectionObj = local[section].is<JsonObject>()
-            ? local[section].as<JsonObject>()
-            : local.createNestedObject(section);
-        JsonObject entry = sectionObj.createNestedObject(tokenId);
-        entry["sha1"] = sha1;
-        entry["size"] = size;
-        if (ext && *ext) entry["ext"] = ext;
     }
 
     // Remove SD files and local manifest entries whose tokenId no longer
