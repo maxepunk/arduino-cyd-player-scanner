@@ -118,6 +118,7 @@ arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=115200
 | `SHOW_QUEUE` | Display queue contents |
 | `QUEUE_STATUS` | Detailed queue diagnostics |
 | `CLEAR_QUEUE` | Delete queue (requires YES confirmation) |
+| `SYNC_ASSETS_NOW` | Trigger asset re-sync from orchestrator without rebooting. Blocking, 5-15 min on first sync; do not invoke during active gameplay. |
 
 ---
 

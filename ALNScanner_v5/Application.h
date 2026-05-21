@@ -1364,7 +1364,30 @@ inline void Application::registerSerialCommands() {
         Serial.println("===========================\n");
     }, "Test FIFO overflow (adds 105 entries)");
 
-    LOG_INFO("[INIT] ✓ Serial commands registered (%d commands)\n", 14);
+    // SYNC_ASSETS_NOW - Trigger incremental asset re-sync without rebooting.
+    // Useful when a token's BMP is regenerated post-Notion-edit and a full
+    // reboot's 5-15 min sync window isn't viable. The sync is diff-based:
+    // only changed/missing files are downloaded. SD mutex timeout was raised
+    // to 60s (Task 4) so mid-session lock acquisition won't time out while
+    // the queue upload task is active.
+    serial.registerCommand("SYNC_ASSETS_NOW", [&config, &orch](const String& args) {
+        (void)args;  // no arguments expected
+        Serial.println("\n=== Asset Re-Sync ===");
+        Serial.println("Triggering incremental asset sync (diff-based)...");
+
+        if (orch.getState() != models::ConnectionState::ORCH_CONNECTED) {
+            Serial.println("✗ Not connected to orchestrator — cannot sync");
+            Serial.println("====================\n");
+            return;
+        }
+
+        auto& assets = services::AssetService::getInstance();
+        bool ok = assets.syncFromOrchestrator(config.getConfig().orchestratorURL, orch);
+        Serial.printf("[CMD] SYNC_ASSETS_NOW: %s\n", ok ? "ok" : "partial/failed");
+        Serial.println("====================\n");
+    }, "Trigger incremental asset re-sync from orchestrator (no reboot needed)");
+
+    LOG_INFO("[INIT] ✓ Serial commands registered (%d commands)\n", 15);
 }
 
 inline void Application::startBackgroundTasks() {
