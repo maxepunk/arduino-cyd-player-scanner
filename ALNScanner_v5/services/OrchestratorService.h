@@ -785,9 +785,11 @@ public:
             snprintf(&hex[i * 2], 3, "%02x", digest[i]);
         }
         hex[40] = '\0';
-        if (expectedSha1.length() != 40 || expectedSha1 != hex) {
+        String wantSha = expectedSha1;
+        wantSha.toLowerCase();
+        if (wantSha.length() != 40 || wantSha != hex) {
             Serial.printf("[ORCH] STREAM: sha1 mismatch got=%s want=%s\n",
-                          hex, expectedSha1.c_str());
+                          hex, wantSha.c_str());
             SD.remove(partPath.c_str());
             return false;
         }
