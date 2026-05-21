@@ -167,7 +167,7 @@ public:
             };
 
             bool ok = orch.httpGETStreamToSD(
-                url, destPath, p.size, p.sha1, 60000, streamProgress);
+                url, destPath, p.size, p.sha1, limits::ASSET_DOWNLOAD_TIMEOUT_MS, streamProgress);
             if (!ok) {
                 failCount++;
                 continue;

@@ -91,7 +91,7 @@ namespace freertos_config {
     constexpr uint8_t BACKGROUND_TASK_CORE = 0;
     constexpr uint32_t BACKGROUND_TASK_DELAY_MS = 100;
     constexpr uint32_t SD_MUTEX_TIMEOUT_MS = 500;
-    constexpr uint32_t SD_MUTEX_LONG_TIMEOUT_MS = 2000;
+    constexpr uint32_t SD_MUTEX_LONG_TIMEOUT_MS = 60000;
 }
 
 // PPP DEBUG CONFIGURATION PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP

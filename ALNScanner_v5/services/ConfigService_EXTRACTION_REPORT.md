@@ -247,7 +247,7 @@ if (sd.takeMutex("caller", 500)) {
 
 ### Timeout Values
 - **Standard operations:** 500ms (SD_MUTEX_TIMEOUT_MS)
-- **Long operations (save):** 2000ms (SD_MUTEX_LONG_TIMEOUT_MS)
+- **Long operations (save):** 60000ms (SD_MUTEX_LONG_TIMEOUT_MS)
 
 ---
 
