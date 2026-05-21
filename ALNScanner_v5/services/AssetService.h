@@ -203,7 +203,7 @@ private:
     void _loadLocalManifest(DynamicJsonDocument& doc) {
         doc.clear();
         hal::SDCard::Lock lock("AssetService::loadManifest",
-                               freertos_config::SD_MUTEX_TIMEOUT_MS);
+                               freertos_config::SD_MUTEX_LONG_TIMEOUT_MS);
         if (!lock.acquired()) return;
 
         if (!SD.exists(paths::MANIFEST_FILE)) {
@@ -225,7 +225,7 @@ private:
     // write and rename leaves the previous manifest intact.
     void _writeLocalManifestAtomic(const DynamicJsonDocument& doc) {
         hal::SDCard::Lock lock("AssetService::writeManifest",
-                               freertos_config::SD_MUTEX_TIMEOUT_MS);
+                               freertos_config::SD_MUTEX_LONG_TIMEOUT_MS);
         if (!lock.acquired()) return;
 
         SD.remove(paths::MANIFEST_TEMP_FILE); // no-op if absent
