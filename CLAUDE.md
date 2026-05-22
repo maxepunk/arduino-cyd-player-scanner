@@ -52,12 +52,11 @@ arduino-cyd-player-scanner/
 │
 ├── ALNScanner1021_Orchestrator/    # ARCHIVED v4.1 (monolithic reference)
 │
-├── sd-card-deploy/                  # SD card content for physical devices
-│   ├── config.txt                  # Example device config
-│   ├── tokens.json                 # Token database
-│   ├── assets/images/              # v5 BMP images (240x320, 24-bit)
-│   ├── assets/audio/               # v5 WAV audio files
-│   └── images/                     # Legacy image path (pre-v5)
+├── sd-card-deploy/                  # Minimal SD card bootstrap (~240 KB)
+│   └── assets/images/
+│       └── placeholder.bmp         # Fallback image; everything else is
+│                                   # synced wirelessly by AssetService
+│                                   # (see SD Card Wireless Sync below).
 │
 ├── libraries/                       # Project-local Arduino libraries
 │   ├── TFT_eSPI/                   # MODIFIED (ST7789 CYD config)
@@ -119,6 +118,7 @@ arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=115200
 | `SHOW_QUEUE` | Display queue contents |
 | `QUEUE_STATUS` | Detailed queue diagnostics |
 | `CLEAR_QUEUE` | Delete queue (requires YES confirmation) |
+| `SYNC_ASSETS_NOW` | Trigger asset re-sync from orchestrator without rebooting. Blocking, 5-15 min on first sync; do not invoke during active gameplay. |
 
 ---
 

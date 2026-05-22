@@ -76,6 +76,11 @@ namespace paths {
     constexpr const char* DEVICE_ID_FILE = "/device_id.txt";
     constexpr const char* IMAGES_DIR = "/assets/images/";
     constexpr const char* AUDIO_DIR = "/assets/audio/";
+    // Asset manifest tracks sha1/size per synced file; updated atomically
+    // after each successful download (stream to .part, rename on success).
+    constexpr const char* MANIFEST_FILE = "/assets/manifest.json";
+    constexpr const char* MANIFEST_TEMP_FILE = "/assets/manifest.tmp";
+    constexpr const char* PART_SUFFIX = ".part";
 }
 
 // PPP SIZE LIMITS PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
@@ -83,6 +88,28 @@ namespace paths {
 namespace limits {
     constexpr int MAX_TOKENS = 50;
     constexpr int MAX_TOKEN_DB_SIZE = 50000; // 50KB
+    // Wire-format ceiling for the manifest payload. Device refuses anything
+    // larger to avoid pathological-input OOM. Tied to the parent CLAUDE.md
+    // "ESP32 Asset Sync Issues" debug step #5.
+    constexpr int MAX_MANIFEST_SIZE = 131072; // 128KB
+
+    // Heap budget for parsed JsonDocument. 64KB covers ~600 entries at the
+    // observed ~80 bytes/entry; if a future manifest grows past this we abort
+    // with a diagnostic rather than risk OOM. Two docs (remote+local) are
+    // live during diff, so total live heap = 2 * MANIFEST_DOC_SIZE.
+    constexpr int MANIFEST_DOC_SIZE = 65536; // 64KB
+    // Streaming download buffer sized to balance TCP window utilization
+    // against heap pressure (TLS session ~22 KB, file I/O overhead, SHA
+    // context). 4 KB chunks are the standard Espressif streaming example.
+    constexpr int ASSET_DOWNLOAD_CHUNK_SIZE = 4096;
+    // Per-file asset download timeout passed to httpGETStreamToSD. The
+    // SD_MUTEX_LONG_TIMEOUT_MS static_assert below ensures the mutex wait
+    // timeout outlasts this so mid-session re-sync (Task 14) doesn't
+    // spuriously fail on lock acquisition.
+    constexpr int ASSET_DOWNLOAD_TIMEOUT_MS = 60000;
+    // Per-file streaming abort threshold used by httpGETStreamToSD;
+    // separate from the manifest-parse pre-flight in AssetService.
+    constexpr int ASSET_MIN_FREE_HEAP = 40960; // 40KB
     constexpr int MAX_DEVICE_ID_LENGTH = 100;
     constexpr int TEAM_ID_LENGTH = 3;
     constexpr int MAX_SSID_LENGTH = 32;
@@ -97,8 +124,20 @@ namespace freertos_config {
     constexpr uint8_t BACKGROUND_TASK_CORE = 0;
     constexpr uint32_t BACKGROUND_TASK_DELAY_MS = 100;
     constexpr uint32_t SD_MUTEX_TIMEOUT_MS = 500;
-    constexpr uint32_t SD_MUTEX_LONG_TIMEOUT_MS = 2000;
+    // Long-form mutex acquire used by operations that hold the SD card for
+    // extended periods (asset streaming downloads up to 60 s per file).
+    // Must outlast the longest holder — see static_assert below.
+    constexpr uint32_t SD_MUTEX_LONG_TIMEOUT_MS = 60000;
 }
+
+// AssetService::httpGETStreamToSD holds the SD mutex for an entire
+// download (up to 60s per file in the default config). The long-timeout
+// mutex must outlast that, otherwise every download aborts on lock
+// acquisition. Encoded as a compile-time constraint so a future tweak
+// to either constant can't silently break asset sync.
+static_assert(freertos_config::SD_MUTEX_LONG_TIMEOUT_MS >= limits::ASSET_DOWNLOAD_TIMEOUT_MS,
+              "SD_MUTEX_LONG_TIMEOUT_MS must outlast ASSET_DOWNLOAD_TIMEOUT_MS "
+              "so mid-session asset sync doesn't fail on mutex acquisition");
 
 // PPP DEBUG CONFIGURATION PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
 

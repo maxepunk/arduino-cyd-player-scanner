@@ -36,6 +36,7 @@
 #include "hal/SDCard.h"
 #include "services/ConfigService.h"
 #include "services/TokenService.h"
+#include "services/AssetService.h"
 #include "services/OrchestratorService.h"
 #include "services/SerialService.h"
 #include "ui/UIStateMachine.h"
@@ -899,6 +900,51 @@ inline bool Application::initializeServices() {
     display.getTFT().setTextColor(0x07E0);  // Green
     display.getTFT().printf("Loaded: %d tokens\n", tokens.getCount());
 
+    // Asset sync (BMPs + audio) — runs after token sync so the remote
+    // manifest is authoritative and we only ever hit the network once per
+    // boot. Progress is rendered to the TFT so the operator can see the
+    // (possibly multi-minute) first-time sync make progress.
+    if (config.getConfig().syncAssets && orchestrator.getState() == models::ORCH_CONNECTED) {
+        LOG_INFO("[INIT] Syncing assets from orchestrator...\n");
+        auto& tft = display.getTFT();
+        tft.setTextColor(0xFFFF);
+        tft.println("Syncing assets...");
+        int16_t progressRow = tft.getCursorY();
+
+        // Guard redraws by (fileIndex, integer-percent): the streaming
+        // download fires progress per 4 KB chunk, which would otherwise
+        // produce thousands of redundant TFT writes per sync.
+        int lastFileIdx = -1;
+        int lastPct = -1;
+        auto& assets = services::AssetService::getInstance();
+        assets.setProgressCallback(
+            [&tft, progressRow, &lastFileIdx, &lastPct](const services::AssetService::ProgressInfo& p) {
+                int pct = p.bytesTotal > 0
+                    ? (int)((p.bytesDone * 100) / p.bytesTotal) : 0;
+                if (p.fileIndex == lastFileIdx && pct == lastPct) return;
+                lastFileIdx = p.fileIndex;
+                lastPct = pct;
+                tft.fillRect(0, progressRow, 240, 16, 0x0000);
+                tft.setCursor(0, progressRow);
+                tft.setTextColor(0xFFFF);
+                tft.printf("%s %d/%d %d%%\n",
+                           p.type.c_str(), p.fileIndex, p.fileCount, pct);
+            });
+
+        if (assets.syncFromOrchestrator(config.getConfig().orchestratorURL, orchestrator)) {
+            tft.setTextColor(0x07E0);  // Green
+            tft.println("Assets: Synced");
+        } else {
+            tft.setTextColor(0xFD20);  // Orange
+            tft.println("Assets: Partial");
+        }
+        assets.setProgressCallback(nullptr);
+    } else {
+        LOG_INFO("[INIT] Skipping asset sync (disabled or offline)\n");
+        display.getTFT().setTextColor(0xFD20);
+        display.getTFT().println("Assets: Cached");
+    }
+
     // Serial service ready (command registration done separately)
     LOG_INFO("[INIT] ✓ Serial service ready\n");
 
@@ -1318,7 +1364,30 @@ inline void Application::registerSerialCommands() {
         Serial.println("===========================\n");
     }, "Test FIFO overflow (adds 105 entries)");
 
-    LOG_INFO("[INIT] ✓ Serial commands registered (%d commands)\n", 14);
+    // SYNC_ASSETS_NOW - Trigger incremental asset re-sync without rebooting.
+    // Useful when a token's BMP is regenerated post-Notion-edit and a full
+    // reboot's 5-15 min sync window isn't viable. The sync is diff-based:
+    // only changed/missing files are downloaded. SD mutex timeout was raised
+    // to 60s (Task 4) so mid-session lock acquisition won't time out while
+    // the queue upload task is active.
+    serial.registerCommand("SYNC_ASSETS_NOW", [&config, &orch](const String& args) {
+        (void)args;  // no arguments expected
+        Serial.println("\n=== Asset Re-Sync ===");
+        Serial.println("Triggering incremental asset sync (diff-based)...");
+
+        if (orch.getState() != models::ConnectionState::ORCH_CONNECTED) {
+            Serial.println("✗ Not connected to orchestrator — cannot sync");
+            Serial.println("====================\n");
+            return;
+        }
+
+        auto& assets = services::AssetService::getInstance();
+        bool ok = assets.syncFromOrchestrator(config.getConfig().orchestratorURL, orch);
+        Serial.printf("[CMD] SYNC_ASSETS_NOW: %s\n", ok ? "ok" : "partial/failed");
+        Serial.println("====================\n");
+    }, "Trigger incremental asset re-sync from orchestrator (no reboot needed)");
+
+    LOG_INFO("[INIT] ✓ Serial commands registered (%d commands)\n", 15);
 }
 
 inline void Application::startBackgroundTasks() {

@@ -20,6 +20,7 @@ struct DeviceConfig {
 
     // Feature flags
     bool syncTokens = true;     // Sync token database from orchestrator
+    bool syncAssets = true;     // Sync BMP images and audio files at boot
     bool debugMode = false;     // Enable serial commands, defer RFID init
 
     // Default constructor
@@ -86,6 +87,7 @@ struct DeviceConfig {
         Serial.printf("Team ID: %s\n", teamID.length() > 0 ? teamID.c_str() : "(not set)");
         Serial.printf("Device ID: %s\n", deviceID.length() > 0 ? deviceID.c_str() : "(auto-generate)");
         Serial.printf("Sync Tokens: %s\n", syncTokens ? "true" : "false");
+        Serial.printf("Sync Assets: %s\n", syncAssets ? "true" : "false");
         Serial.printf("Debug Mode: %s\n", debugMode ? "true" : "false");
         Serial.println("============================\n");
     }

@@ -230,7 +230,7 @@ bool SDCard::_present = false;
  * 1. MUTEX CRITICAL FOR DUAL-CORE OPERATION
  *    - Main loop (Core 1) handles RFID scanning, display updates, config loading
  *    - Background task (Core 0) handles queue uploads, token sync
- *    - Both cores access SD card concurrently ’ Race conditions without mutex
+ *    - Both cores access SD card concurrently ï¿½ Race conditions without mutex
  *
  * 2. SPI BUS DEADLOCK PREVENTION (CRITICAL PATTERN)
  *    - SD card and TFT_eSPI both use VSPI hardware SPI bus
@@ -252,7 +252,7 @@ bool SDCard::_present = false;
  *
  * 4. TIMEOUT VALUES
  *    - Standard timeout: 500ms (SD_MUTEX_TIMEOUT_MS)
- *    - Long operations: 2000ms (SD_MUTEX_LONG_TIMEOUT_MS)
+ *    - Long operations: 60000ms (SD_MUTEX_LONG_TIMEOUT_MS)
  *    - Boot phase: Mutex may be nullptr, allow unprotected access
  *
  * 5. LOGGING LEVELS

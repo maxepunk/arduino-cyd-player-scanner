@@ -253,7 +253,7 @@ bool SDCard::_present = false;
  *
  * 4. TIMEOUT VALUES
  *    - Standard timeout: 500ms (SD_MUTEX_TIMEOUT_MS)
- *    - Long operations: 2000ms (SD_MUTEX_LONG_TIMEOUT_MS)
+ *    - Long operations: 60000ms (SD_MUTEX_LONG_TIMEOUT_MS)
  *    - Boot phase: Mutex may be nullptr, allow unprotected access
  *
  * 5. LOGGING LEVELS
