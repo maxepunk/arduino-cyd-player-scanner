@@ -41,6 +41,7 @@
 #include "../config.h"
 #include "PayloadBuilder.h"
 #include "BatchId.h"
+#include "ScanResponse.h"
 
 namespace services {
 
@@ -171,15 +172,26 @@ public:
     // ─── Scan Operations ───────────────────────────────────────────────
 
     /**
-     * @brief Send scan to orchestrator immediately
+     * @brief Send scan to orchestrator — SINGLE bounded attempt, classified result
      * @param scan Scan data with tokenId, teamId, deviceId, timestamp
      * @param config Device configuration (for orchestrator URL)
-     * @return true if successfully sent (2xx) or duplicate (409), false otherwise
+     * @return Classified outcome (see services::ScanOutcome / ScanResponse.h)
      *
-     * Implementation from v4.1 lines 1650-1716
-     * Uses consolidated HTTP helper (FLASH SAVINGS)
+     * SCAN-PATH CONTRACT (F-PARITY-06): this runs on the Core-1 main loop
+     * between RFID read and token display. It makes exactly ONE bounded
+     * HTTP attempt (10s timeout) — NO retries, NO backoff. The old
+     * httpWithRetry here could freeze the device for ~61s with a token on
+     * the pad. Retries/backoff belong exclusively to the Core-0 background
+     * task (health checks + batch upload of queued scans).
+     *
+     * 409 handling (F-PARITY-03 / F-SCAN-03, decisions A4/A5): 409 is NOT
+     * "duplicate" — the backend never returns 409 for player duplicates.
+     * The body distinguishes SESSION_NOT_FOUND (scan NOT recorded, final)
+     * from status:rejected (scan recorded, video unavailable). See
+     * ScanResponse.h. The caller decides queueing/UI from the outcome.
      */
-    bool sendScan(const models::ScanData& scan, const models::DeviceConfig& config) {
+    services::ScanOutcome sendScan(const models::ScanData& scan,
+                                   const models::DeviceConfig& config) {
         LOG_INFO("\n[ORCH-SEND] ═══ HTTP POST /api/scan START ═══\n");
         LOG_INFO("[ORCH-SEND] Free heap: %d bytes\n", ESP.getFreeHeap());
 
@@ -188,7 +200,7 @@ public:
         if (config.orchestratorURL.length() == 0) {
             LOG_INFO("[ORCH-SEND] ✗✗✗ FAILURE ✗✗✗ No orchestrator URL configured\n");
             LOG_INFO("[ORCH-SEND] ═══ HTTP POST /api/scan END ═══\n\n");
-            return false;
+            return services::ScanOutcome::RETRY_QUEUE;
         }
 
         // Build JSON payload (extracted to PayloadBuilder.h for DRY + testability)
@@ -198,11 +210,10 @@ public:
         LOG_INFO("[ORCH-SEND] Payload: %s\n", requestBody.c_str());
         LOG_INFO("[ORCH-SEND] Payload size: %d bytes\n", requestBody.length());
 
-        // Send via consolidated HTTP helper with retry logic
+        // SINGLE bounded attempt — no httpWithRetry on the scan path
+        // (F-PARITY-06: retries here blocked the main loop up to ~61s)
         String url = config.orchestratorURL + "/api/scan";
-        auto resp = httpWithRetry([&]() {
-            return _http.httpPOST(url, requestBody, 10000);
-        }, "scan submission");
+        auto resp = _http.httpPOST(url, requestBody, 10000);
 
         unsigned long latencyMs = millis() - startMs;
         LOG_INFO("[ORCH-SEND] HTTP response code: %d\n", resp.code);
@@ -212,23 +223,27 @@ public:
             LOG_INFO("[ORCH-SEND] Response body: %s\n", resp.body.c_str());
         }
 
-        // Accept 2xx success codes AND 409 Conflict (duplicate scan)
-        bool success = resp.success || (resp.code == 409);
+        services::ScanOutcome outcome = services::classifyScanResponse(resp.code, resp.body);
 
-        if (success) {
-            if (resp.code == 409) {
-                LOG_INFO("[ORCH-SEND] ✓ 409 Conflict - orchestrator received scan (duplicate handled)\n");
-            } else {
-                LOG_INFO("[ORCH-SEND] ✓✓✓ SUCCESS ✓✓✓ HTTP %d received\n", resp.code);
-            }
-        } else {
-            LOG_INFO("[ORCH-SEND] ✗✗✗ FAILURE ✗✗✗ HTTP %d (will queue)\n", resp.code);
+        switch (outcome) {
+            case services::ScanOutcome::ACCEPTED:
+                LOG_INFO("[ORCH-SEND] ✓✓✓ SUCCESS ✓✓✓ HTTP %d — scan recorded\n", resp.code);
+                break;
+            case services::ScanOutcome::ACCEPTED_NO_VIDEO:
+                LOG_INFO("[ORCH-SEND] ✓ 409 video-rejected — scan recorded, video unavailable\n");
+                break;
+            case services::ScanOutcome::REJECTED_NO_SESSION:
+                LOG_INFO("[ORCH-SEND] ✗ 409 SESSION_NOT_FOUND — scan NOT recorded (final, no queue)\n");
+                break;
+            case services::ScanOutcome::RETRY_QUEUE:
+                LOG_INFO("[ORCH-SEND] ✗✗✗ FAILURE ✗✗✗ HTTP %d (caller will queue)\n", resp.code);
+                break;
         }
 
         LOG_INFO("[ORCH-SEND] Free heap after send: %d bytes\n", ESP.getFreeHeap());
         LOG_INFO("[ORCH-SEND] ═══ HTTP POST /api/scan END ═══\n\n");
 
-        return success;
+        return outcome;
     }
 
     /**

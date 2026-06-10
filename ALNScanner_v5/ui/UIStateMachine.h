@@ -157,13 +157,22 @@ public:
 
     // Transition to PROCESSING_VIDEO state
     // Source: displayProcessingImage() lines 2179-2235
-    void showProcessing(const models::TokenMetadata& token) {
-        LOG_INFO("[UI-STATE] Transitioning to PROCESSING_VIDEO (token: %s)\n",
-                 token.tokenId.c_str());
+    //
+    // @param label    Overlay text. Default "Sending..." (normal video
+    //                 treatment). Pass "VIDEO UNAVAILABLE" when the video
+    //                 cannot play — scan queued offline or rejected by the
+    //                 backend (decision A4: queued/rejected scans never
+    //                 trigger playback later).
+    // @param sublabel Optional second overlay line (e.g., "Rescan later").
+    void showProcessing(const models::TokenMetadata& token,
+                        const String& label = "Sending...",
+                        const String& sublabel = "") {
+        LOG_INFO("[UI-STATE] Transitioning to PROCESSING_VIDEO (token: %s, label: %s)\n",
+                 token.tokenId.c_str(), label.c_str());
 
         // Create processing screen with token metadata
         auto screen = std::unique_ptr<ProcessingScreen>(
-            new ProcessingScreen(token)
+            new ProcessingScreen(token, label, sublabel)
         );
 
         // Transition and render
