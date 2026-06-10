@@ -31,6 +31,7 @@
 #include <ArduinoJson.h>
 #include <SD.h>
 #include <mbedtls/sha1.h>
+#include <esp_system.h>
 #include <functional>
 #include <vector>
 #include "../models/Config.h"
@@ -39,6 +40,7 @@
 #include "../hal/SDCard.h"
 #include "../config.h"
 #include "PayloadBuilder.h"
+#include "BatchId.h"
 
 namespace services {
 
@@ -482,8 +484,12 @@ public:
 
         LOG_INFO("[ORCH-BATCH] Uploading batch of %zu entries\n", batch.size());
 
-        // Generate batch ID for idempotency (stable across HTTP retries)
-        String batchId = config.deviceID + "_" + String(_nextBatchId);
+        // Generate batch ID for idempotency. Stable across HTTP retries of
+        // THIS batch (counter advances only on success), but unique across
+        // reboots via the per-boot nonce (F-SCAN-02: the old boot-reset
+        // counter collided with the backend's 1-hour idempotency cache and
+        // silently lost scans).
+        String batchId = services::makeBatchId(config.deviceID, _batchBootNonce, _nextBatchId);
         LOG_INFO("[ORCH-BATCH] Batch ID: %s\n", batchId.c_str());
 
         // Build batch request JSON (extracted to PayloadBuilder.h for DRY + testability)
@@ -812,6 +818,12 @@ private:
     OrchestratorService() {
         // Initialize spinlock mutex for queue size
         _queue.mutex = portMUX_INITIALIZER_UNLOCKED;
+
+        // Per-boot nonce for batch-id uniqueness across reboots (F-SCAN-02).
+        // esp_random() draws from the hardware RNG (pseudo-random before RF
+        // is enabled, which is still sufficient — any per-boot variation
+        // defeats the idempotency-cache collision).
+        _batchBootNonce = esp_random();
     }
 
     ~OrchestratorService() = default;
@@ -831,8 +843,13 @@ private:
     // Device config (for background task - includes orchestratorURL and deviceID)
     models::DeviceConfig _config;
 
-    // Batch ID counter for idempotency (increments only on successful upload)
+    // Batch ID counter for idempotency (increments only on successful upload,
+    // so HTTP retries of one batch reuse the same id)
     uint32_t _nextBatchId = 0;
+
+    // Per-boot random nonce (set once in the constructor) — guarantees batch
+    // ids never repeat across reboots (F-SCAN-02)
+    uint32_t _batchBootNonce = 0;
 
     // Last POSIX TZ string applied via setenv/tzset. Initialized from the
     // orchestrator's /health response on each successful health check; the
