@@ -138,6 +138,8 @@ pio test -e native -f test_token   # Run only token tests
 - `models/Config.h`: `validate()` (SSID/password/URL/teamID validation, http→https auto-upgrade), `isComplete()`, default values
 - `models/Token.h`: `cleanTokenId()` (colon/space removal, lowercase, trim), `isVideoToken()`, `getImagePath()`/`getAudioPath()` path construction, `ScanData` validation
 - `services/PayloadBuilder.h`: `buildScanJson()` (single scan payload), `parseScanFromJsonl()` (queue deserialization), `buildBatchJson()` (batch upload payload), round-trip serialization
+- `services/ScanResponse.h`: `classifyScanResponse()` (/api/scan outcome classification: 2xx, both 409 body shapes, malformed bodies, network/5xx)
+- `services/BatchId.h`: `makeBatchId()` (batch-id format, retry stability, cross-reboot uniqueness via boot nonce)
 - `hal/NDEFParser.h`: `parseNDEFText()` (TLV parsing, NDEF record extraction, SAK validation, page-spanning text, edge cases)
 
 **What's NOT tested (requires future mock infrastructure):**
@@ -175,7 +177,7 @@ chip select (SS), causing bus contention that can degrade scan reliability.
 // Token Metadata (models/Token.h)
 // SIMPLIFIED in v5 - only two fields, paths constructed from tokenId
 struct TokenMetadata {
-    String tokenId;  // "kaa001" or UID hex
+    String tokenId;  // "kaa001" (NDEF text; UID-hex fallback removed in v5)
     String video;    // "kaa001.mp4" or "" for non-video
 
     bool isVideoToken() const;
@@ -394,15 +396,24 @@ Queue removal uses stream-based file rebuild (temp file) instead of loading the 
      This ensures the orchestrator only sees real game tokenIds.
 
 4. Orchestrator Routing (for known tokens only)
-   - IF connected: POST /api/scan (immediate)
+   - IF connected: SINGLE bounded POST /api/scan attempt (10s timeout, NO
+     retries on the scan path — retries/backoff live only in the Core-0
+     background task; see `services/ScanResponse.h`)
      Payload: {tokenId, teamId?, deviceId, deviceType:"esp32", timestamp}
-     - 2xx -> Display token
-     - 409 -> Display (duplicate OK for player scanners)
-     - Other -> Queue for retry
-   - IF offline: Append to /queue.jsonl
+     - 2xx -> scan recorded -> Display token
+     - 409 {error:"SESSION_NOT_FOUND"} -> scan NOT recorded. FINAL failure
+       (decision A5): NOT queued; show SCAN_FAILED ("NO SESSION"); player
+       rescans once a session exists
+     - 409 {status:"rejected"} -> scan WAS recorded; only the realtime video
+       trigger was rejected (video busy / VLC down). Final success: display
+       with "VIDEO UNAVAILABLE / Rescan later" overlay (decision A4)
+     - Network failure / 5xx / unrecognized response -> Queue for batch replay
+   - IF offline: Append to /queue.jsonl (video tokens get the VIDEO
+     UNAVAILABLE treatment — queued scans never trigger playback later, A4)
 
 5. Token Display
-   - Video token (video field set): Show /assets/images/{id}.bmp + "Sending..." overlay, 2.5s auto-hide
+   - Video token (video field set): Show /assets/images/{id}.bmp + "Sending..." overlay
+     ("VIDEO UNAVAILABLE / Rescan later" if queued or video-rejected), 2.5s auto-hide
    - Regular token: Show /assets/images/{id}.bmp + Play /assets/audio/{id}.wav, double-tap dismiss
 ```
 
@@ -418,7 +429,7 @@ not in DB). See `ui/screens/ScanFailedScreen.h` and
 
 ### Background Task (FreeRTOS Core 0)
 
-Every 10 seconds: check orchestrator health (GET /health), update connection state, upload queued scans in batches of 10 via POST /api/scan/batch.
+Every 10 seconds: check orchestrator health (GET /health), update connection state, upload queued scans in batches of 10 via POST /api/scan/batch. Batch ids are `{deviceID}_{bootNonce:08x}_{counter}` — stable across HTTP retries of one batch (counter advances only on success), unique across reboots (per-boot `esp_random()` nonce; see `services/BatchId.h`). HTTP retry/backoff (`httpWithRetry`, up to ~61s) is allowed ONLY here — never on the Core-1 scan path.
 
 ---
 
