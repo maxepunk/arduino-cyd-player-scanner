@@ -499,11 +499,23 @@ public:
 
         LOG_INFO("[ORCH-BATCH] Uploading batch of %zu entries\n", batch.size());
 
+        // Ensure the per-boot nonce is ready (lazy draw, post-WiFi entropy).
+        // Must happen before the first makeBatchId() call this boot.
+        _ensureBootNonce();
+
         // Generate batch ID for idempotency. Stable across HTTP retries of
         // THIS batch (counter advances only on success), but unique across
         // reboots via the per-boot nonce (F-SCAN-02: the old boot-reset
         // counter collided with the backend's 1-hour idempotency cache and
         // silently lost scans).
+        //
+        // Reboot-window trade-off: if the device reboots while httpWithRetry
+        // is in flight for this batch, the next boot draws a fresh nonce and
+        // re-uploads the same scans under a new batchId.  The backend will
+        // process them again, producing duplicates.  For player-scanner scans
+        // duplicates are benign (players can re-view the same token); losing
+        // scans is NOT acceptable (permanent audit gap).  Duplicate-on-reboot
+        // is therefore the deliberate choice over loss-on-reboot.
         String batchId = services::makeBatchId(config.deviceID, _batchBootNonce, _nextBatchId);
         LOG_INFO("[ORCH-BATCH] Batch ID: %s\n", batchId.c_str());
 
@@ -834,11 +846,11 @@ private:
         // Initialize spinlock mutex for queue size
         _queue.mutex = portMUX_INITIALIZER_UNLOCKED;
 
-        // Per-boot nonce for batch-id uniqueness across reboots (F-SCAN-02).
-        // esp_random() draws from the hardware RNG (pseudo-random before RF
-        // is enabled, which is still sufficient — any per-boot variation
-        // defeats the idempotency-cache collision).
-        _batchBootNonce = esp_random();
+        // _batchBootNonce is intentionally left at 0 here.
+        // It is generated lazily on the first uploadQueueBatch() call so that
+        // esp_random() is drawn AFTER WiFi init, when the hardware RNG has
+        // been seeded by RF events (stronger entropy than the bootloader-seeded
+        // state at construction time).  See _ensureBootNonce().
     }
 
     ~OrchestratorService() = default;
@@ -862,9 +874,16 @@ private:
     // so HTTP retries of one batch reuse the same id)
     uint32_t _nextBatchId = 0;
 
-    // Per-boot random nonce (set once in the constructor) — guarantees batch
-    // ids never repeat across reboots (F-SCAN-02)
+    // Per-boot random nonce — guarantees batch ids never repeat across reboots
+    // (F-SCAN-02).  Initialized to 0; populated lazily by _ensureBootNonce()
+    // on the first uploadQueueBatch() call, at which point WiFi is up and
+    // the hardware RNG has been seeded by RF events (better entropy than
+    // the bootloader-seeded state at construction time).
     uint32_t _batchBootNonce = 0;
+
+    // Flag: has the boot nonce been drawn yet?  Prevents re-drawing on
+    // subsequent calls (the nonce must be stable for the device's lifetime).
+    bool _batchBootNonceReady = false;
 
     // Last POSIX TZ string applied via setenv/tzset. Initialized from the
     // orchestrator's /health response on each successful health check; the
@@ -1024,6 +1043,25 @@ private:
         failed.code = -1;
         failed.success = false;
         return failed;
+    }
+
+    // ─── Boot Nonce ────────────────────────────────────────────────────
+
+    /**
+     * @brief Ensure the per-boot nonce is populated (lazy, idempotent).
+     *
+     * Called at the start of the first uploadQueueBatch() so that
+     * esp_random() runs after WiFi initialisation, when the hardware RNG
+     * entropy pool has been stirred by RF activity.  Safe to call multiple
+     * times — nonce is drawn at most once per boot.
+     */
+    void _ensureBootNonce() {
+        if (!_batchBootNonceReady) {
+            _batchBootNonce = esp_random();
+            _batchBootNonceReady = true;
+            LOG_INFO("[ORCH-BATCH] Boot nonce generated post-WiFi: %08lx\n",
+                     static_cast<unsigned long>(_batchBootNonce));
+        }
     }
 
     // ─── Queue File Operations ─────────────────────────────────────────
