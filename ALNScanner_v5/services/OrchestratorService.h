@@ -1054,6 +1054,14 @@ private:
      * esp_random() runs after WiFi initialisation, when the hardware RNG
      * entropy pool has been stirred by RF activity.  Safe to call multiple
      * times — nonce is drawn at most once per boot.
+     *
+     * The check-then-set is not atomic: the Core-0 upload task and the
+     * Core-1 FORCE_UPLOAD serial command (DEBUG_MODE only) could both hit
+     * the first upload and draw two nonces, the second overwriting the
+     * first. Deliberately left unguarded — both values satisfy the only
+     * property the nonce exists for (cross-reboot batchId uniqueness),
+     * and each batchId string is built once per call, so single-batch
+     * idempotency is unaffected.
      */
     void _ensureBootNonce() {
         if (!_batchBootNonceReady) {
