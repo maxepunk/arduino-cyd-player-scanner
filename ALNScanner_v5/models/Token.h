@@ -8,7 +8,7 @@ namespace models {
 // Token metadata structure - simplified for v5
 // ALWAYS constructs paths from tokenId (ignores orchestrator metadata fields)
 struct TokenMetadata {
-    String tokenId;  // "kaa001" or UID hex - ALWAYS used for path construction
+    String tokenId;  // "kaa001" (NDEF text; UID-hex fallback removed in v5) - ALWAYS used for path construction
     String video;    // "kaa001.mp4" or "" - only used for behavior (modal vs persistent)
 
     TokenMetadata() = default;

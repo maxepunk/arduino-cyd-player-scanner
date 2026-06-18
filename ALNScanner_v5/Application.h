@@ -344,6 +344,32 @@ private:
      */
     String generateTimestamp();
 
+    /**
+     * @brief Apply the shared outcome logic for a classified scan response.
+     *
+     * Both processRFIDScan() and the SIMULATE_SCAN serial command send a scan
+     * to the orchestrator and receive a ScanOutcome.  The queueing decision
+     * and UI transition for the REJECTED_NO_SESSION case are identical in
+     * both paths — this helper owns that shared logic so the two call sites
+     * cannot drift.
+     *
+     * @param outcome      Classified result from classifyScanResponse().
+     * @param scan         Scan data (needed for queueScan on RETRY_QUEUE).
+     * @param orchestrator Reference to the orchestrator singleton.
+     * @param[out] videoUnavailable
+     *             Set to true when the scan was queued or video was
+     *             rejected — caller should show the "VIDEO UNAVAILABLE" hint.
+     *             Unchanged (left false) on ACCEPTED.
+     * @return true  if scan processing should continue to the display step
+     *               (ACCEPTED or ACCEPTED_NO_VIDEO or RETRY_QUEUE).
+     * @return false if processing is complete and the caller should return
+     *               immediately (REJECTED_NO_SESSION — scan not recorded).
+     */
+    bool applyScanOutcome(services::ScanOutcome outcome,
+                          const models::ScanData& scan,
+                          services::OrchestratorService& orchestrator,
+                          bool& videoUnavailable);
+
     // PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
     // PPP LIFECYCLE MANAGEMENT PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
     // PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
@@ -522,6 +548,10 @@ inline void Application::processRFIDScan() {
     }
 
     // ═══ ORCHESTRATOR SEND/QUEUE ════════════════════════════════════
+    // SCAN-PATH CONTRACT (F-PARITY-06): at most ONE bounded send attempt
+    // here; on failure the scan is queued immediately. Retries/backoff
+    // belong exclusively to the Core-0 background task. Token display
+    // never waits beyond that single attempt.
     auto& config = services::ConfigService::getInstance();
     auto& orchestrator = services::OrchestratorService::getInstance();
 
@@ -532,23 +562,35 @@ inline void Application::processRFIDScan() {
         generateTimestamp()
     );
 
+    // Video tokens scanned offline/queued must show the "video unavailable"
+    // treatment, not the normal video-pending treatment — a queued scan
+    // will never trigger playback later (decision A4).
+    bool videoUnavailable = false;
+
     if (orchestrator.getState() == models::ORCH_CONNECTED) {
-        LOG_INFO("[SCAN] Attempting to send to orchestrator...\n");
-        if (!orchestrator.sendScan(scan, config.getConfig())) {
-            LOG_INFO("[SCAN] Send failed, queueing\n");
-            orchestrator.queueScan(scan);
-        } else {
-            LOG_INFO("[SCAN] ✓ Sent to orchestrator\n");
+        LOG_INFO("[SCAN] Attempting to send to orchestrator (single attempt)...\n");
+        services::ScanOutcome outcome = orchestrator.sendScan(scan, config.getConfig());
+        LOG_INFO("[SCAN] Outcome: %d\n", static_cast<int>(outcome));
+        // applyScanOutcome() owns queueing and the REJECTED_NO_SESSION UI
+        // transition — single definition shared with SIMULATE_SCAN.
+        if (!applyScanOutcome(outcome, scan, orchestrator, videoUnavailable)) {
+            return;  // REJECTED_NO_SESSION: scan not recorded, stop processing
         }
     } else {
         LOG_INFO("[SCAN] Offline, queueing immediately\n");
         orchestrator.queueScan(scan);
+        videoUnavailable = true;  // queued scans never trigger video (A4)
     }
 
     // ═══ TOKEN DISPLAY ══════════════════════════════════════════════
     if (token->isVideoToken()) {
-        LOG_INFO("[SCAN] Video token detected\n");
-        _ui->showProcessing(*token);
+        LOG_INFO("[SCAN] Video token detected%s\n",
+                 videoUnavailable ? " (video unavailable hint)" : "");
+        if (videoUnavailable) {
+            _ui->showProcessing(*token, "VIDEO UNAVAILABLE", "Rescan later");
+        } else {
+            _ui->showProcessing(*token);
+        }
     } else {
         LOG_INFO("[SCAN] Regular token detected\n");
         _ui->showToken(*token);
@@ -627,6 +669,64 @@ inline String Application::generateTimestamp() {
         "1970-01-01T%02lu:%02lu:%02lu.%03luZ",
         hours % 24, minutes % 60, seconds % 60, ms % 1000);
     return String(timestamp);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SHARED SCAN OUTCOME HANDLER - Single source of truth for queueing/UI
+// ═══════════════════════════════════════════════════════════════════════
+
+/**
+ * applyScanOutcome() - Shared outcome handler for scan response classification.
+ *
+ * Owns the queueing decision and the REJECTED_NO_SESSION UI transition so
+ * that processRFIDScan() and the SIMULATE_SCAN serial command cannot drift.
+ * The caller is responsible for its own logging and for the final token
+ * display step.
+ *
+ * Returns true  → continue to display (ACCEPTED / ACCEPTED_NO_VIDEO / RETRY_QUEUE)
+ * Returns false → caller must return immediately (REJECTED_NO_SESSION)
+ */
+inline bool Application::applyScanOutcome(services::ScanOutcome outcome,
+                                           const models::ScanData& scan,
+                                           services::OrchestratorService& orchestrator,
+                                           bool& videoUnavailable) {
+    switch (outcome) {
+        case services::ScanOutcome::ACCEPTED:
+            // Scan recorded, video trigger sent — normal happy path.
+            // videoUnavailable stays false.
+            return true;
+
+        case services::ScanOutcome::REJECTED_NO_SESSION:
+            // 409 SESSION_NOT_FOUND: scan was NOT persisted. Final per A5 —
+            // do NOT queue (retrying without a session would hit the same 409).
+            // Show the failure screen so the player knows to wait for a session.
+            LOG_INFO("[SCAN-OUTCOME] REJECTED_NO_SESSION — scan not recorded, not queued\n");
+            if (_ui) {
+                _ui->showScanFailed("NO SESSION");
+            }
+            return false;  // Tell the caller to stop processing
+
+        case services::ScanOutcome::ACCEPTED_NO_VIDEO:
+            // 409 video-rejected: scan WAS recorded; only the realtime video
+            // trigger failed (video busy / VLC down). Final per A5 — never
+            // requeue (a replayed scan must never start video later). UI hint
+            // (A4): "VIDEO UNAVAILABLE / Rescan later".
+            LOG_INFO("[SCAN-OUTCOME] ACCEPTED_NO_VIDEO — scan recorded, video skipped\n");
+            videoUnavailable = true;
+            return true;
+
+        case services::ScanOutcome::RETRY_QUEUE:
+            // Network failure / 5xx / unrecognised response. Queue for batch
+            // replay by the Core-0 background task. Video tokens in the queue
+            // never trigger playback on replay (A4).
+            LOG_INFO("[SCAN-OUTCOME] RETRY_QUEUE — queuing scan\n");
+            orchestrator.queueScan(scan);
+            videoUnavailable = true;
+            return true;
+    }
+
+    // Unreachable — all enum cases are handled above.
+    return true;
 }
 
 // PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
@@ -1135,14 +1235,27 @@ inline void Application::registerSerialCommands() {
         scan.deviceId = config.getConfig().deviceID;
         scan.timestamp = generateTimestamp();
 
-        // Send or queue (same as real scan)
+        // Send or queue — use the shared outcome handler (same logic as
+        // processRFIDScan, single definition to prevent drift).
         if (orch.getState() == models::ConnectionState::ORCH_CONNECTED) {
-            Serial.println("Sending to orchestrator...");
-            if (orch.sendScan(scan, config.getConfig())) {
-                Serial.println("✓ Sent successfully");
+            Serial.println("Sending to orchestrator (single attempt)...");
+            services::ScanOutcome outcome = orch.sendScan(scan, config.getConfig());
+            bool videoUnavailable = false;
+            bool continueProcessing = applyScanOutcome(outcome, scan, orch, videoUnavailable);
+
+            // Translate outcome to serial diagnostic output
+            if (!continueProcessing) {
+                Serial.println("✗ 409 SESSION_NOT_FOUND: scan NOT recorded");
+                Serial.println("  Final per A5 — NOT queued. Real scan shows NO SESSION screen.");
+            } else if (videoUnavailable) {
+                if (outcome == services::ScanOutcome::ACCEPTED_NO_VIDEO) {
+                    Serial.println("✓ Scan recorded; video unavailable (409 rejected)");
+                    Serial.println("  Real scan shows VIDEO UNAVAILABLE overlay (A4)");
+                } else {
+                    Serial.println("Send failed, scan queued for batch replay");
+                }
             } else {
-                Serial.println("Send failed, queuing...");
-                orch.queueScan(scan);
+                Serial.println("✓ Sent successfully (scan recorded)");
             }
         } else {
             Serial.println("Offline, queuing...");

@@ -31,6 +31,7 @@
 #include <ArduinoJson.h>
 #include <SD.h>
 #include <mbedtls/sha1.h>
+#include <esp_system.h>
 #include <functional>
 #include <vector>
 #include "../models/Config.h"
@@ -39,6 +40,8 @@
 #include "../hal/SDCard.h"
 #include "../config.h"
 #include "PayloadBuilder.h"
+#include "BatchId.h"
+#include "ScanResponse.h"
 
 namespace services {
 
@@ -169,15 +172,26 @@ public:
     // ─── Scan Operations ───────────────────────────────────────────────
 
     /**
-     * @brief Send scan to orchestrator immediately
+     * @brief Send scan to orchestrator — SINGLE bounded attempt, classified result
      * @param scan Scan data with tokenId, teamId, deviceId, timestamp
      * @param config Device configuration (for orchestrator URL)
-     * @return true if successfully sent (2xx) or duplicate (409), false otherwise
+     * @return Classified outcome (see services::ScanOutcome / ScanResponse.h)
      *
-     * Implementation from v4.1 lines 1650-1716
-     * Uses consolidated HTTP helper (FLASH SAVINGS)
+     * SCAN-PATH CONTRACT (F-PARITY-06): this runs on the Core-1 main loop
+     * between RFID read and token display. It makes exactly ONE bounded
+     * HTTP attempt (10s timeout) — NO retries, NO backoff. The old
+     * httpWithRetry here could freeze the device for ~61s with a token on
+     * the pad. Retries/backoff belong exclusively to the Core-0 background
+     * task (health checks + batch upload of queued scans).
+     *
+     * 409 handling (F-PARITY-03 / F-SCAN-03, decisions A4/A5): 409 is NOT
+     * "duplicate" — the backend never returns 409 for player duplicates.
+     * The body distinguishes SESSION_NOT_FOUND (scan NOT recorded, final)
+     * from status:rejected (scan recorded, video unavailable). See
+     * ScanResponse.h. The caller decides queueing/UI from the outcome.
      */
-    bool sendScan(const models::ScanData& scan, const models::DeviceConfig& config) {
+    services::ScanOutcome sendScan(const models::ScanData& scan,
+                                   const models::DeviceConfig& config) {
         LOG_INFO("\n[ORCH-SEND] ═══ HTTP POST /api/scan START ═══\n");
         LOG_INFO("[ORCH-SEND] Free heap: %d bytes\n", ESP.getFreeHeap());
 
@@ -186,7 +200,7 @@ public:
         if (config.orchestratorURL.length() == 0) {
             LOG_INFO("[ORCH-SEND] ✗✗✗ FAILURE ✗✗✗ No orchestrator URL configured\n");
             LOG_INFO("[ORCH-SEND] ═══ HTTP POST /api/scan END ═══\n\n");
-            return false;
+            return services::ScanOutcome::RETRY_QUEUE;
         }
 
         // Build JSON payload (extracted to PayloadBuilder.h for DRY + testability)
@@ -196,11 +210,10 @@ public:
         LOG_INFO("[ORCH-SEND] Payload: %s\n", requestBody.c_str());
         LOG_INFO("[ORCH-SEND] Payload size: %d bytes\n", requestBody.length());
 
-        // Send via consolidated HTTP helper with retry logic
+        // SINGLE bounded attempt — no httpWithRetry on the scan path
+        // (F-PARITY-06: retries here blocked the main loop up to ~61s)
         String url = config.orchestratorURL + "/api/scan";
-        auto resp = httpWithRetry([&]() {
-            return _http.httpPOST(url, requestBody, 10000);
-        }, "scan submission");
+        auto resp = _http.httpPOST(url, requestBody, 10000);
 
         unsigned long latencyMs = millis() - startMs;
         LOG_INFO("[ORCH-SEND] HTTP response code: %d\n", resp.code);
@@ -210,23 +223,27 @@ public:
             LOG_INFO("[ORCH-SEND] Response body: %s\n", resp.body.c_str());
         }
 
-        // Accept 2xx success codes AND 409 Conflict (duplicate scan)
-        bool success = resp.success || (resp.code == 409);
+        services::ScanOutcome outcome = services::classifyScanResponse(resp.code, resp.body);
 
-        if (success) {
-            if (resp.code == 409) {
-                LOG_INFO("[ORCH-SEND] ✓ 409 Conflict - orchestrator received scan (duplicate handled)\n");
-            } else {
-                LOG_INFO("[ORCH-SEND] ✓✓✓ SUCCESS ✓✓✓ HTTP %d received\n", resp.code);
-            }
-        } else {
-            LOG_INFO("[ORCH-SEND] ✗✗✗ FAILURE ✗✗✗ HTTP %d (will queue)\n", resp.code);
+        switch (outcome) {
+            case services::ScanOutcome::ACCEPTED:
+                LOG_INFO("[ORCH-SEND] ✓✓✓ SUCCESS ✓✓✓ HTTP %d — scan recorded\n", resp.code);
+                break;
+            case services::ScanOutcome::ACCEPTED_NO_VIDEO:
+                LOG_INFO("[ORCH-SEND] ✓ 409 video-rejected — scan recorded, video unavailable\n");
+                break;
+            case services::ScanOutcome::REJECTED_NO_SESSION:
+                LOG_INFO("[ORCH-SEND] ✗ 409 SESSION_NOT_FOUND — scan NOT recorded (final, no queue)\n");
+                break;
+            case services::ScanOutcome::RETRY_QUEUE:
+                LOG_INFO("[ORCH-SEND] ✗✗✗ FAILURE ✗✗✗ HTTP %d (caller will queue)\n", resp.code);
+                break;
         }
 
         LOG_INFO("[ORCH-SEND] Free heap after send: %d bytes\n", ESP.getFreeHeap());
         LOG_INFO("[ORCH-SEND] ═══ HTTP POST /api/scan END ═══\n\n");
 
-        return success;
+        return outcome;
     }
 
     /**
@@ -482,8 +499,24 @@ public:
 
         LOG_INFO("[ORCH-BATCH] Uploading batch of %zu entries\n", batch.size());
 
-        // Generate batch ID for idempotency (stable across HTTP retries)
-        String batchId = config.deviceID + "_" + String(_nextBatchId);
+        // Ensure the per-boot nonce is ready (lazy draw, post-WiFi entropy).
+        // Must happen before the first makeBatchId() call this boot.
+        _ensureBootNonce();
+
+        // Generate batch ID for idempotency. Stable across HTTP retries of
+        // THIS batch (counter advances only on success), but unique across
+        // reboots via the per-boot nonce (F-SCAN-02: the old boot-reset
+        // counter collided with the backend's 1-hour idempotency cache and
+        // silently lost scans).
+        //
+        // Reboot-window trade-off: if the device reboots while httpWithRetry
+        // is in flight for this batch, the next boot draws a fresh nonce and
+        // re-uploads the same scans under a new batchId.  The backend will
+        // process them again, producing duplicates.  For player-scanner scans
+        // duplicates are benign (players can re-view the same token); losing
+        // scans is NOT acceptable (permanent audit gap).  Duplicate-on-reboot
+        // is therefore the deliberate choice over loss-on-reboot.
+        String batchId = services::makeBatchId(config.deviceID, _batchBootNonce, _nextBatchId);
         LOG_INFO("[ORCH-BATCH] Batch ID: %s\n", batchId.c_str());
 
         // Build batch request JSON (extracted to PayloadBuilder.h for DRY + testability)
@@ -812,6 +845,12 @@ private:
     OrchestratorService() {
         // Initialize spinlock mutex for queue size
         _queue.mutex = portMUX_INITIALIZER_UNLOCKED;
+
+        // _batchBootNonce is intentionally left at 0 here.
+        // It is generated lazily on the first uploadQueueBatch() call so that
+        // esp_random() is drawn AFTER WiFi init, when the hardware RNG has
+        // been seeded by RF events (stronger entropy than the bootloader-seeded
+        // state at construction time).  See _ensureBootNonce().
     }
 
     ~OrchestratorService() = default;
@@ -831,8 +870,20 @@ private:
     // Device config (for background task - includes orchestratorURL and deviceID)
     models::DeviceConfig _config;
 
-    // Batch ID counter for idempotency (increments only on successful upload)
+    // Batch ID counter for idempotency (increments only on successful upload,
+    // so HTTP retries of one batch reuse the same id)
     uint32_t _nextBatchId = 0;
+
+    // Per-boot random nonce — guarantees batch ids never repeat across reboots
+    // (F-SCAN-02).  Initialized to 0; populated lazily by _ensureBootNonce()
+    // on the first uploadQueueBatch() call, at which point WiFi is up and
+    // the hardware RNG has been seeded by RF events (better entropy than
+    // the bootloader-seeded state at construction time).
+    uint32_t _batchBootNonce = 0;
+
+    // Flag: has the boot nonce been drawn yet?  Prevents re-drawing on
+    // subsequent calls (the nonce must be stable for the device's lifetime).
+    bool _batchBootNonceReady = false;
 
     // Last POSIX TZ string applied via setenv/tzset. Initialized from the
     // orchestrator's /health response on each successful health check; the
@@ -992,6 +1043,33 @@ private:
         failed.code = -1;
         failed.success = false;
         return failed;
+    }
+
+    // ─── Boot Nonce ────────────────────────────────────────────────────
+
+    /**
+     * @brief Ensure the per-boot nonce is populated (lazy, idempotent).
+     *
+     * Called at the start of the first uploadQueueBatch() so that
+     * esp_random() runs after WiFi initialisation, when the hardware RNG
+     * entropy pool has been stirred by RF activity.  Safe to call multiple
+     * times — nonce is drawn at most once per boot.
+     *
+     * The check-then-set is not atomic: the Core-0 upload task and the
+     * Core-1 FORCE_UPLOAD serial command (DEBUG_MODE only) could both hit
+     * the first upload and draw two nonces, the second overwriting the
+     * first. Deliberately left unguarded — both values satisfy the only
+     * property the nonce exists for (cross-reboot batchId uniqueness),
+     * and each batchId string is built once per call, so single-batch
+     * idempotency is unaffected.
+     */
+    void _ensureBootNonce() {
+        if (!_batchBootNonceReady) {
+            _batchBootNonce = esp_random();
+            _batchBootNonceReady = true;
+            LOG_INFO("[ORCH-BATCH] Boot nonce generated post-WiFi: %08lx\n",
+                     static_cast<unsigned long>(_batchBootNonce));
+        }
     }
 
     // ─── Queue File Operations ─────────────────────────────────────────
