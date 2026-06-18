@@ -23,34 +23,42 @@ ESP32 player scanner for NFC token scanning. Reads RFID tokens, displays images/
 ```
 arduino-cyd-player-scanner/
 ├── ALNScanner_v5/                   # Production v5.0 (OOP architecture)
-│   ├── ALNScanner_v5.ino           # 16 lines (main entry)
-│   ├── Application.h                # ~1,375 lines (orchestrator)
-│   ├── config.h                     # 120 lines (all constants)
+│   ├── ALNScanner_v5.ino            # Main entry (delegates to Application)
+│   ├── Application.h                # Orchestrator (boot, loop, command registration)
+│   ├── config.h                     # All constexpr constants (pins, timing, paths, limits)
 │   ├── hal/                         # Hardware Abstraction Layer
-│   │   ├── SDCard.h                # 270 lines (thread-safe RAII)
-│   │   ├── RFIDReader.h            # 917 lines (software SPI + NDEF)
-│   │   ├── DisplayDriver.h         # 440 lines (BMP rendering)
-│   │   ├── AudioDriver.h           # 241 lines (lazy I2S init)
-│   │   └── TouchDriver.h           # 118 lines (WiFi EMI filtering)
+│   │   ├── SDCard.h                 # Thread-safe RAII SD access
+│   │   ├── RFIDReader.h             # Software SPI MFRC522 driver
+│   │   ├── DisplayDriver.h          # BMP rendering
+│   │   ├── AudioDriver.h            # Lazy I2S init
+│   │   ├── TouchDriver.h            # WiFi EMI filtering
+│   │   └── NDEFParser.h             # TLV / NDEF text parsing (unit-tested)
 │   ├── models/                      # Data Models
-│   │   ├── Config.h                # 94 lines (validation logic)
-│   │   ├── Token.h                 # 89 lines (metadata + scanning)
-│   │   └── ConnectionState.h       # 82 lines (thread-safe state)
+│   │   ├── Config.h                 # Config struct + validation logic
+│   │   ├── Token.h                  # Token metadata + ScanData
+│   │   └── ConnectionState.h        # Thread-safe connection state
 │   ├── services/                    # Business Logic
-│   │   ├── ConfigService.h         # 552 lines (SD config mgmt)
-│   │   ├── TokenService.h          # 381 lines (token DB queries)
-│   │   ├── OrchestratorService.h   # ~1,155 lines (HTTP + Queue)
-│   │   └── SerialService.h         # 278 lines (command registry)
+│   │   ├── ConfigService.h          # SD config mgmt
+│   │   ├── TokenService.h           # Token DB queries
+│   │   ├── OrchestratorService.h    # HTTP + offline queue + Core-0 task
+│   │   ├── SerialService.h          # Command registry + built-ins
+│   │   ├── AssetService.h           # Wireless BMP/audio sync from orchestrator
+│   │   ├── AssetManifestDiff.h      # Local-vs-remote manifest diff
+│   │   ├── BatchId.h                # Batch-id generation (unit-tested)
+│   │   ├── PayloadBuilder.h         # Scan/batch JSON construction (unit-tested)
+│   │   └── ScanResponse.h           # /api/scan outcome classification (unit-tested)
 │   └── ui/                          # User Interface Layer
-│       ├── Screen.h                # 217 lines (Template Method base)
-│       ├── UIStateMachine.h        # 365 lines (state + touch routing)
+│       ├── Screen.h                 # Template Method base
+│       ├── UIStateMachine.h         # State + touch routing
 │       └── screens/
-│           ├── ReadyScreen.h       # 244 lines
-│           ├── StatusScreen.h      # 319 lines
-│           ├── TokenDisplayScreen.h # 392 lines
-│           └── ProcessingScreen.h  # 265 lines
+│           ├── ReadyScreen.h
+│           ├── StatusScreen.h
+│           ├── TokenDisplayScreen.h
+│           ├── ProcessingScreen.h
+│           └── ScanFailedScreen.h   # Non-blocking scan-failure feedback
 │
-├── ALNScanner1021_Orchestrator/    # ARCHIVED v4.1 (monolithic reference)
+├── archive/                         # Archived references: v4.1 ALNScanner1021_Orchestrator,
+│                                    # ALNScanner0812Working, CYD_Multi, deprecated docs/scripts/specs
 │
 ├── sd-card-deploy/                  # Minimal SD card bootstrap (~240 KB)
 │   └── assets/images/
@@ -104,6 +112,8 @@ arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=115200
 
 | Command | Description |
 |---------|-------------|
+| `HELP` | List available serial commands (SerialService built-in) |
+| `MEM` | Report free heap (SerialService built-in) |
 | `CONFIG` | Show configuration |
 | `STATUS` / `DIAG_NETWORK` | Connection status, queue size, memory |
 | `TOKENS` | Display token database (first 10) |
@@ -114,6 +124,7 @@ arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=115200
 | `SIMULATE_SCAN:tokenId` | Test token processing without hardware |
 | `SIMULATE_FAIL[:reason]` | Show non-blocking SCAN_FAILED screen for UI verification (default reason: `READ FAILED`) |
 | `QUEUE_TEST` | Add 20 mock scans to queue |
+| `FORCE_OVERFLOW` | Test FIFO queue-overflow protection |
 | `FORCE_UPLOAD` | Manually trigger batch upload |
 | `SHOW_QUEUE` | Display queue contents |
 | `QUEUE_STATUS` | Detailed queue diagnostics |
@@ -243,12 +254,16 @@ Video tokens and regular tokens use the same image path. The `video` field in to
 ```ini
 WIFI_SSID=YourNetworkName
 WIFI_PASSWORD=your_password
-ORCHESTRATOR_URL=http://10.0.0.177:3000
+ORCHESTRATOR_URL=http://10.0.0.177:3000   # https:// also accepted; http:// is auto-upgraded to https://
 TEAM_ID=001
-DEVICE_ID=SCANNER_FLOOR1_001   # Auto-generated from MAC if not set
+DEVICE_ID=SCANNER_FLOOR1_001    # Auto-generated from MAC if not set
 SYNC_TOKENS=true                # false to skip token sync
+SYNC_ASSETS=true                # false to skip BMP/audio asset sync (first boot ~30-40 MB)
 DEBUG_MODE=false                # true to defer RFID init for serial commands
 ```
+
+`ORCHESTRATOR_URL` is validated to start with `http://` or `https://`; an `http://`
+value is rewritten to `https://` at validation time (asset sync uses HTTPS).
 
 ---
 
@@ -326,7 +341,7 @@ No pull-ups, no OUTPUT mode:
 SD card and TFT display share the VSPI hardware bus. **Display MUST initialize before SD card.**
 
 ```cpp
-// CORRECT - Application.h initializeEarlyHardware() (line ~697)
+// CORRECT - Application::initializeEarlyHardware() in Application.h
 void Application::initializeEarlyHardware() {
     // 1. Display FIRST - Sets up VSPI for TFT
     display.begin();
@@ -458,7 +473,7 @@ Every 10 seconds: check orchestrator health (GET /health), update connection sta
 | No RFID scanning | DEBUG_MODE setting | Send START_SCANNER or set DEBUG_MODE=false |
 | Queue not uploading | WiFi/orchestrator | Check STATUS, verify /health endpoint |
 | Continuous beeping | RFID scan interval | Should be 500ms, not 100ms |
-| `SCAN FAILED` repeats on good tokens | NDEF read reliability | Capture `[NDEF-RETRY]` / `[NDEF-FAIL]` logs (uncomment `#define NDEF_DEBUG`); if retries never recover, suspect marginal RF coupling or counterfeit tags — see plan `/root/.claude/plans/bright-hopping-rossum.md` R4 |
+| `SCAN FAILED` repeats on good tokens | NDEF read reliability | Capture `[NDEF-RETRY]` / `[NDEF-FAIL]` logs (uncomment `#define NDEF_DEBUG`); if retries never recover, suspect marginal RF coupling or counterfeit tags |
 | `UNKNOWN TOKEN` on real game cards | Token DB sync | `TOKENS` serial command to list DB; re-sync `sd-card-deploy/tokens.json` and the SD card |
 | Serial commands ignored | GPIO 3 conflict | Set DEBUG_MODE=true or use boot override |
 | Colors inverted | TFT_RGB_ORDER | Should be TFT_BGR for dual USB CYD |
