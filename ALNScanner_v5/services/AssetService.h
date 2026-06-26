@@ -104,12 +104,18 @@ public:
             return false;
         }
 
-        // Pre-flight heap budget: 2 * MANIFEST_DOC_SIZE for remote+local, plus
-        // TLS + HTTP + download headroom (~48 KB).
-        const size_t neededHeap = (limits::MANIFEST_DOC_SIZE * 2) + 49152;
+        // Pre-flight heap budget. ArduinoJson 7's document model is elastic:
+        // the capacity passed to DynamicJsonDocument is IGNORED and heap tracks
+        // the actual parsed size (~1x the JSON). So the live cost is roughly the
+        // manifest body size for EACH of the remote+local docs — NOT the
+        // obsolete v6 "2 * MANIFEST_DOC_SIZE" worst case, which over-reserved
+        // 176 KB and made sync impossible on a WROOM-32 (~190 KB free at boot).
+        // Budget remote+local parsed docs (~2x body each, conservative) plus
+        // TLS + HTTP + streaming-download headroom (~48 KB).
+        const size_t neededHeap = (size_t)body.length() * 4 + 49152;
         if (ESP.getFreeHeap() < neededHeap) {
-            LOG_INFO("[ASSET-SVC] Aborting: heap %u < required %u\n",
-                     ESP.getFreeHeap(), (unsigned)neededHeap);
+            LOG_INFO("[ASSET-SVC] Aborting: heap %u < required %u (manifest %u B)\n",
+                     ESP.getFreeHeap(), (unsigned)neededHeap, (unsigned)body.length());
             return false;
         }
 

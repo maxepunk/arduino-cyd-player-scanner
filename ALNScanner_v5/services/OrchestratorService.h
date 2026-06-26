@@ -763,10 +763,16 @@ public:
 
         mbedtls_sha1_context shaCtx;
         mbedtls_sha1_init(&shaCtx);
-        mbedtls_sha1_starts_ret(&shaCtx);
+        mbedtls_sha1_starts(&shaCtx);
 
         WiFiClient* stream = client.getStreamPtr();
-        uint8_t buffer[limits::ASSET_DOWNLOAD_CHUNK_SIZE];
+        // NOT on the stack: the Arduino loopTask stack is only 8 KB and the
+        // mbedTLS handshake (client.GET() above) already consumes most of it,
+        // so a 4 KB on-stack buffer here overflows the stack — stack-canary
+        // panic on the very first asset download. 'static' moves it to .bss;
+        // safe because asset sync is single-threaded at boot (one file at a
+        // time) and never re-entered.
+        static uint8_t buffer[limits::ASSET_DOWNLOAD_CHUNK_SIZE];
         size_t totalRead = 0;
         bool ok = true;
 
@@ -790,7 +796,7 @@ public:
                 ok = false;
                 break;
             }
-            mbedtls_sha1_update_ret(&shaCtx, buffer, n);
+            mbedtls_sha1_update(&shaCtx, buffer, n);
             totalRead += n;
 
             if (onProgress) onProgress(totalRead, expectedSize);
@@ -801,7 +807,7 @@ public:
         f.close();
 
         unsigned char digest[20];
-        mbedtls_sha1_finish_ret(&shaCtx, digest);
+        mbedtls_sha1_finish(&shaCtx, digest);
         mbedtls_sha1_free(&shaCtx);
         client.end();
 

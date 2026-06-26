@@ -93,11 +93,12 @@ namespace limits {
     // "ESP32 Asset Sync Issues" debug step #5.
     constexpr int MAX_MANIFEST_SIZE = 131072; // 128KB
 
-    // Heap budget for parsed JsonDocument. 64KB covers ~600 entries at the
-    // observed ~80 bytes/entry; if a future manifest grows past this we abort
-    // with a diagnostic rather than risk OOM. Two docs (remote+local) are
-    // live during diff, so total live heap = 2 * MANIFEST_DOC_SIZE.
-    constexpr int MANIFEST_DOC_SIZE = 65536; // 64KB
+    // Nominal manifest doc capacity passed to DynamicJsonDocument. NOTE:
+    // ArduinoJson 7 is elastic — this capacity arg is IGNORED and heap tracks
+    // the actual parsed size — so it no longer bounds live heap. The
+    // AssetService pre-flight heap check is therefore sized to the actual
+    // manifest body length, not to "2 * MANIFEST_DOC_SIZE".
+    constexpr int MANIFEST_DOC_SIZE = 65536; // 64KB (nominal; v7 ignores it)
     // Streaming download buffer sized to balance TCP window utilization
     // against heap pressure (TLS session ~22 KB, file I/O overhead, SHA
     // context). 4 KB chunks are the standard Espressif streaming example.
