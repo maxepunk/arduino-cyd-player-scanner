@@ -843,7 +843,7 @@ bool RFIDReader::begin() {
     LOG_INFO("  CollReg: 0x%02X (bit 7 should be 1: %s)\n",
               collReg, (collReg & 0x80) ? "OK" : "FAIL");
     uint8_t rfCfg = readRegister(MFRC522::RFCfgReg);
-    LOG_INFO("  RFCfgReg: 0x%02X (should be 0x70 for max gain)\n", rfCfg);
+    LOG_INFO("  RFCfgReg: 0x%02X (expect 0x40 = 33dB; intentionally NOT max-gain 0x70 - see gain comment above)\n", rfCfg);
 
     // Mark as initialized
     _initialized = true;
