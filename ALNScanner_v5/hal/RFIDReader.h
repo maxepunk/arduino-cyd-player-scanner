@@ -797,8 +797,16 @@ bool RFIDReader::begin() {
 
     // === NTAG-Specific Optimizations ===
 
-    // Configure receiver gain for maximum sensitivity (48dB)
-    writeRegister(MFRC522::RFCfgReg, 0x70);
+    // Receiver gain = 33dB (0x40, the MFRC522 default) — deliberately NOT max
+    // (48dB/0x70). Max gain saturates the receiver when a token rests directly
+    // on the antenna (close-range over-coupling) -> malformed ATQA
+    // (ErrorReg ProtocolErr=0x01) on the WUPA wake-up. That was the long-standing
+    // "first tap works, then SCAN FAILED while the token sits on the surface"
+    // bug: detection (requestA) failed ~90% at resting distance, while holding
+    // the token slightly away worked. 33dB suits a close-contact TAP scanner —
+    // it reads on contact and ignores far-away cards (no phantom reads).
+    // Verified on hardware: resting taps went from ~3/40 to 7/7 reads, 0 fails.
+    writeRegister(MFRC522::RFCfgReg, 0x40);
 
     // Set receiver threshold for NTAG
     writeRegister(MFRC522::RxThresholdReg, 0x84);
