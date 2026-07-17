@@ -115,5 +115,38 @@ inline void updateEntry(JsonDocument& local,
     if (ext && *ext) entry["ext"] = ext;
 }
 
+// ─── Pack identity (Phase 3 A2 staleness visibility) ──────────────────
+
+// Parsed from the manifest's optional top-level `pack` block. All fields
+// EMPTY when the block is absent — callers assign unconditionally so a
+// re-sync against a pack-less manifest (backend rollback, different
+// orchestrator) CLEARS any previously-recorded identity instead of
+// letting a stale one masquerade as current.
+struct PackIdentity {
+    String packId;
+    String version;
+    String hash;
+};
+
+inline PackIdentity extractPackIdentity(const JsonDocument& remoteDoc) {
+    PackIdentity id;
+    if (remoteDoc.containsKey("pack")) {
+        id.packId  = remoteDoc["pack"]["packId"]      | "";
+        id.version = remoteDoc["pack"]["version"]     | "";
+        id.hash    = remoteDoc["pack"]["contentHash"] | "";
+    }
+    return id;
+}
+
+// Short display form of a content hash for boot-log eyeballing: strips an
+// optional "algo:" prefix (e.g. "sha256:"), then takes the first 8 chars.
+// Degrades gracefully on plain hex or short strings — never slices into
+// the middle of a hash the way a fixed-offset substring would.
+inline String shortHash(const String& hash) {
+    int colon = hash.indexOf(':');
+    String hex = (colon >= 0) ? hash.substring(colon + 1) : hash;
+    return hex.length() > 8 ? hex.substring(0, 8) : hex;
+}
+
 } // namespace manifest
 } // namespace services

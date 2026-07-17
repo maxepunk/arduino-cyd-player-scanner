@@ -197,11 +197,62 @@ void test_updateEntry_repairs_corrupt_section_type() {
         images["kaa001"]["sha1"].as<const char*>());
 }
 
+// ─── extractPackIdentity() / shortHash(): A2 pack staleness fields ────
+
+void test_extractPackIdentity_reads_pack_block() {
+    DynamicJsonDocument remote(1024);
+    remote["pack"]["packId"] = "about-last-night";
+    remote["pack"]["version"] = "1.2.0";
+    remote["pack"]["contentHash"] = "sha256:deadbeefcafe0123";
+
+    services::manifest::PackIdentity id =
+        services::manifest::extractPackIdentity(remote);
+    TEST_ASSERT_EQUAL_STRING("about-last-night", id.packId.c_str());
+    TEST_ASSERT_EQUAL_STRING("1.2.0", id.version.c_str());
+    TEST_ASSERT_EQUAL_STRING("sha256:deadbeefcafe0123", id.hash.c_str());
+}
+
+void test_extractPackIdentity_absent_block_yields_empty_fields() {
+    // The stale-identity regression: assigning this result unconditionally
+    // must CLEAR a previously-recorded identity when the manifest carries
+    // no pack block (backend rollback / pre-pack orchestrator).
+    DynamicJsonDocument remote(1024);
+    remote["images"].to<JsonObject>();
+
+    services::manifest::PackIdentity id =
+        services::manifest::extractPackIdentity(remote);
+    TEST_ASSERT_EQUAL(0, (int)id.packId.length());
+    TEST_ASSERT_EQUAL(0, (int)id.version.length());
+    TEST_ASSERT_EQUAL(0, (int)id.hash.length());
+}
+
+void test_shortHash_strips_algo_prefix() {
+    TEST_ASSERT_EQUAL_STRING("deadbeef",
+        services::manifest::shortHash("sha256:deadbeefcafe0123").c_str());
+}
+
+void test_shortHash_plain_hex_takes_leading_chars() {
+    TEST_ASSERT_EQUAL_STRING("0123abcd",
+        services::manifest::shortHash("0123abcdef0123abcdef0123abcdef0123abcdef").c_str());
+}
+
+void test_shortHash_short_input_passes_through() {
+    TEST_ASSERT_EQUAL_STRING("abc",
+        services::manifest::shortHash("abc").c_str());
+    TEST_ASSERT_EQUAL_STRING("",
+        services::manifest::shortHash("").c_str());
+}
+
 // ─── Unity runner ────────────────────────────────────────────────────
 
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
     UNITY_BEGIN();
+    RUN_TEST(test_extractPackIdentity_reads_pack_block);
+    RUN_TEST(test_extractPackIdentity_absent_block_yields_empty_fields);
+    RUN_TEST(test_shortHash_strips_algo_prefix);
+    RUN_TEST(test_shortHash_plain_hex_takes_leading_chars);
+    RUN_TEST(test_shortHash_short_input_passes_through);
     RUN_TEST(test_diff_detects_added_image);
     RUN_TEST(test_diff_skips_unchanged_entries);
     RUN_TEST(test_diff_flags_sha_mismatch);

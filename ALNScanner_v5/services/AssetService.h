@@ -142,14 +142,19 @@ public:
         // Phase 3 A2 staleness visibility: the pack identity rides the
         // asset manifest (no second sync loop on-device). Absent on
         // pre-pack backends — old and new manifests both parse fine.
-        if (remoteDoc.containsKey("pack")) {
-            packId_      = remoteDoc["pack"]["packId"].as<String>();
-            packVersion_ = remoteDoc["pack"]["version"].as<String>();
-            packHash_    = remoteDoc["pack"]["contentHash"].as<String>();
-            LOG_INFO("[ASSET-SVC] pack: %s v%s (%s)\n",
-                     packId_.c_str(), packVersion_.c_str(),
-                     packHash_.length() > 15 ? packHash_.substring(7, 15).c_str()
-                                             : packHash_.c_str());
+        // Assigned UNCONDITIONALLY: a pack-less manifest clears any
+        // previously-recorded identity ("unknown" on screen beats a stale
+        // identity masquerading as current).
+        {
+            manifest::PackIdentity pack = manifest::extractPackIdentity(remoteDoc);
+            packId_      = pack.packId;
+            packVersion_ = pack.version;
+            packHash_    = pack.hash;
+            if (packId_.length()) {
+                LOG_INFO("[ASSET-SVC] pack: %s v%s (%s)\n",
+                         packId_.c_str(), packVersion_.c_str(),
+                         manifest::shortHash(packHash_).c_str());
+            }
         }
 
         // Step 2: read whatever local manifest already exists. Missing or
