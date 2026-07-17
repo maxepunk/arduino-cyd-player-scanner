@@ -58,6 +58,13 @@ public:
         return instance;
     }
 
+    // A2 pack identity captured from the last synced asset manifest
+    // (empty strings on pre-pack backends). Surfaced in the boot log and
+    // the serial CONFIG output for cross-device staleness eyeballing.
+    const String& packId() const { return packId_; }
+    const String& packVersion() const { return packVersion_; }
+    const String& packHash() const { return packHash_; }
+
     AssetService(const AssetService&) = delete;
     AssetService& operator=(const AssetService&) = delete;
 
@@ -132,6 +139,19 @@ public:
         }
         body = String(); // free the buffered copy ASAP
 
+        // Phase 3 A2 staleness visibility: the pack identity rides the
+        // asset manifest (no second sync loop on-device). Absent on
+        // pre-pack backends — old and new manifests both parse fine.
+        if (remoteDoc.containsKey("pack")) {
+            packId_      = remoteDoc["pack"]["packId"].as<String>();
+            packVersion_ = remoteDoc["pack"]["version"].as<String>();
+            packHash_    = remoteDoc["pack"]["contentHash"].as<String>();
+            LOG_INFO("[ASSET-SVC] pack: %s v%s (%s)\n",
+                     packId_.c_str(), packVersion_.c_str(),
+                     packHash_.length() > 15 ? packHash_.substring(7, 15).c_str()
+                                             : packHash_.c_str());
+        }
+
         // Step 2: read whatever local manifest already exists. Missing or
         // corrupt = empty, which forces a full re-sync.
         DynamicJsonDocument localDoc(limits::MANIFEST_DOC_SIZE);
@@ -201,6 +221,9 @@ public:
 private:
     AssetService() = default;
     ProgressCallback _onProgress;
+    String packId_;
+    String packVersion_;
+    String packHash_;
 
     // ─── Helpers ───────────────────────────────────────────────────────
 
