@@ -322,9 +322,24 @@ stub, so what it shows is what a real tap shows.
 ## Asset preparation
 
 `scripts/prepare-ghost-audio.sh <in> <out>` batch-converts audio via ffmpeg
-to the target format. It is a developer convenience only — the documented
-route for whoever prepares a card is Audacity, because they are on
-Windows/macOS without this toolchain.
+to the target format. A developer convenience only — the documented route
+for whoever prepares a card is Audacity, because they are on Windows/macOS
+without this toolchain.
+
+**Scope: it replaces Part 1 Step 2 (format) and nothing else.** It does not
+choose which ghost is which, and it does not touch `tokens.json`; Steps 4-7
+still apply.
+
+Output names are derived from input names using the same rule the firmware
+applies to tag text (`cleanTokenId`): lowercase, spaces and colons removed.
+So `Ghost 02.wav` becomes `ghost02.wav`, and naming your sources `ghost01.mp3`
+means no renaming step at all. Two sources that clean to the same name are a
+hard error rather than a silent overwrite.
+
+An earlier version numbered outputs `ghost01`, `ghost02`… in glob order,
+which assigned ghosts alphabetically by whatever the sources happened to be
+called. Every file converted, every name was valid, and the ghosts said the
+wrong things — worth remembering before adding "convenience" naming back.
 
 ## Format constraints
 

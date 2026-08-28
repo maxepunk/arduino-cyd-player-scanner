@@ -13,12 +13,20 @@
 # any WAV variant with a compressed or float encoding. Output here is
 # 16-bit PCM / mono / 22050 Hz, which is the format the README publishes.
 #
+# This converts format ONLY. It does not decide which ghost is which.
+#
+# An earlier version numbered outputs ghost01/ghost02/... in glob order,
+# which assigned ghosts alphabetically by whatever the source files happened
+# to be called. Every file converted fine, every name was valid, and the
+# ghosts said the wrong things — silently wrong, with nothing to diagnose.
+#
+# Output names are now derived from the input names using the SAME rule the
+# firmware applies to tag text (models::Token.h cleanTokenId): lowercase,
+# spaces and colons removed. So name your sources ghost01.mp3 and you get
+# ghost01.wav directly, with no renaming step at all.
+#
 # Usage:
 #   ./scripts/prepare-ghost-audio.sh <input-dir> <output-dir>
-#
-# Every audio file in <input-dir> is converted and written to <output-dir>
-# named ghostNN.wav in sorted order. Rename afterwards if your ghosts are
-# not meant to be numbered in that order.
 
 set -euo pipefail
 
@@ -56,10 +64,27 @@ fi
 echo "Converting ${#files[@]} file(s) -> ${SAMPLE_RATE}Hz mono 16-bit PCM WAV"
 echo
 
-n=0
 for f in "${files[@]}"; do
-    n=$((n + 1))
-    out=$(printf "%s/ghost%02d.wav" "$OUT_DIR" "$n")
+    # Mirror cleanTokenId(): strip the extension, lowercase, drop spaces
+    # and colons. Matches what the firmware does to the text on a tag.
+    base=$(basename "$f")
+    base=${base%.*}
+    clean=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]' | tr -d ' :')
+
+    if [ -z "$clean" ]; then
+        echo "  skipping (name empty after cleaning): $(basename "$f")" >&2
+        continue
+    fi
+
+    out="$OUT_DIR/$clean.wav"
+
+    # Refuse to clobber: two sources cleaning to one name (Ghost01.mp3 and
+    # ghost 01.wav) would otherwise leave whichever ran last, silently.
+    if [ -e "$out" ]; then
+        echo "  ERROR: $(basename "$out") already exists - two sources clean to the same name" >&2
+        echo "         offending input: $(basename "$f")" >&2
+        exit 1
+    fi
 
     ffmpeg -loglevel error -y -i "$f" \
         -acodec "$CODEC" -ar "$SAMPLE_RATE" -ac "$CHANNELS" \
@@ -77,4 +102,6 @@ done
 
 echo
 echo "Done. Copy these into the card's assets/audio/ folder."
-echo "Remember the filenames must match the keys in tokens.json."
+echo
+echo "Each filename above must have a matching entry in tokens.json."
+echo "This script does NOT edit tokens.json - see README.md Step 5."
