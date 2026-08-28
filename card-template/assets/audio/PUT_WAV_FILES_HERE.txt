@@ -1,0 +1,16 @@
+Put your ghost audio in THIS folder.
+
+One file per ghost, named to match its entry in tokens.json:
+
+    ghost01.wav
+    ghost02.wav
+    ghost03.wav
+
+Names must be lowercase, with no spaces, and must end in .wav
+
+The file MUST be a WAV saved as "Signed 16-bit PCM", mono, 22050 Hz.
+The README explains exactly how to export that from Audacity. Any
+other format will not play, even though the file looks fine on your
+computer.
+
+You can delete this text file once you have added your audio.

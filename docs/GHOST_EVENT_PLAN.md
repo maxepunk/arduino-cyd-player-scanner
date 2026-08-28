@@ -241,7 +241,7 @@ arduino-cli compile \
 
 ---
 
-## 8. New files
+## 8. New files (DONE)
 
 - **`README.md`** — rewritten, split by audience.
   - *Making a card* (the remote, non-technical person): which tags to buy
@@ -256,7 +256,21 @@ arduino-cli compile \
   `assets/audio/` + `assets/images/` with `.gitkeep`.
 - **`scripts/prepare-ghost-audio.sh`** — ffmpeg wrapper producing the exact
   target format. **Developer-side convenience only**; the documented path for
-  the card-maker is Audacity.
+  the card-maker is Audacity. Verified end-to-end: output confirmed as
+  `pcm_s16le / 22050 Hz / mono / 16-bit` via ffprobe.
+
+**Tag IDs are sequential** (`ghost01`, `ghost02`, …). The template ships five
+placeholder entries; the README covers adding, removing and renaming them.
+The real ghost count was NOT needed to write any of this — the content is
+still being designed, and a count would change only how many lines the
+template starts with.
+
+**The naming trap the README leads with:** `cleanTokenId()` lowercases the
+tag's text and strips colons and spaces, then filenames are built from the
+result. A tag written `Ghost 01` needs the file `ghost01.wav`. The tag is
+forgiving; the filename is not. This presents as a ghost that reads fine and
+then shows THAT'S NO SPIRIT — the hardest symptom to diagnose remotely, which
+is why `TOKENS` now prints FOUND/missing per file.
 
 ---
 

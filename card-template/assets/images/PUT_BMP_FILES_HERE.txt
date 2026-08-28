@@ -1,0 +1,16 @@
+Images are OPTIONAL. If a ghost has no image, the scanner draws its
+own ghost on screen instead, which is the normal look for this build.
+
+If you do want a picture for a ghost, put it in THIS folder, named to
+match its entry in tokens.json:
+
+    ghost01.bmp
+    ghost02.bmp
+
+Names must be lowercase, with no spaces, and must end in .bmp
+
+The file MUST be a 24-bit uncompressed BMP, 240 wide by 320 tall.
+Anything else will not display.
+
+You can delete this text file. If you are not using images at all,
+leave this folder empty rather than deleting it.

@@ -1,0 +1,26 @@
+# ═══════════════════════════════════════════════════════════════
+# Ghost Scanner - Configuration
+# ═══════════════════════════════════════════════════════════════
+# This file lives in the ROOT of the microSD card (not in a folder).
+# Lines starting with # are notes and are ignored by the scanner.
+#
+# After changing anything here, power the scanner off and on again.
+# ═══════════════════════════════════════════════════════════════
+
+# ─── Volume ─────────────────────────────────────────────────────
+# How loud the ghosts are.
+#   1.0 = normal        0.0 = silent
+#   1.5 = louder        2.0 = loudest (may distort)
+# Values above 2.0 are automatically reduced to 2.0.
+VOLUME=1.0
+
+# ─── Device name (optional) ─────────────────────────────────────
+# Only used to identify this scanner on its status screen. Handy if
+# you ever build a second one. Letters, numbers and underscores.
+DEVICE_ID=GHOST_001
+
+# ─── Debug mode (leave this false) ──────────────────────────────
+# false = normal operation, the scanner reads ghosts.
+# true  = the scanner will NOT read ghosts until told to over USB.
+# You only ever want true if a developer asks you to set it.
+DEBUG_MODE=false
