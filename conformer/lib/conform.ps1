@@ -39,6 +39,24 @@ if (-not (Test-Path $ffmpeg)) {
     exit 1
 }
 
+# Kept in step with conform.sh: verify the tool actually RUNS, not merely
+# that the file exists. Otherwise every file reports "could not be
+# converted", blaming the user's audio for a broken tool.
+$ffprobeOk = $true
+try {
+    & $ffmpeg -version *> $null
+    if ($LASTEXITCODE -ne 0) { $ffprobeOk = $false }
+} catch {
+    $ffprobeOk = $false
+}
+if (-not $ffprobeOk) {
+    Write-Host 'PROBLEM: the conversion tool will not run on this computer.'
+    Write-Host ''
+    Write-Host 'Tell whoever sent you this folder that ffmpeg.exe will not'
+    Write-Host 'run on your PC - they can send a different version.'
+    exit 1
+}
+
 if (-not (Test-Path $InDir)) {
     Write-Host "PROBLEM: can't find the folder '$InDir'."
     Write-Host 'This file needs to stay in the same folder as it.'

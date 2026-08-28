@@ -44,6 +44,26 @@ if [ -z "$FFMPEG" ] || [ ! -x "$FFMPEG" ]; then
     exit 1
 fi
 
+# The bundled binary is x86_64. On an Apple Silicon Mac without Rosetta it
+# exists and is executable but cannot actually run. Without this check the
+# per-file handler reports "could not be converted" for every file, which
+# blames the user's audio and sends them off re-exporting it forever.
+if ! "$FFMPEG" -version >/dev/null 2>&1; then
+    echo "PROBLEM: the conversion tool will not run on this computer."
+    echo ""
+    echo "This usually means you have a newer Mac (M1/M2/M3/M4) that needs"
+    echo "a compatibility feature called Rosetta installed."
+    echo ""
+    echo "To install it, open the Terminal app and paste this line:"
+    echo ""
+    echo "    softwareupdate --install-rosetta"
+    echo ""
+    echo "Then try this again. If that does not work, tell whoever sent you"
+    echo "this folder that ffmpeg will not run on your Mac - they can send"
+    echo "a different version."
+    exit 1
+fi
+
 if [ ! -d "$IN_DIR" ]; then
     echo "PROBLEM: can't find the folder '$IN_DIR'."
     echo "This file needs to stay in the same folder as it."
