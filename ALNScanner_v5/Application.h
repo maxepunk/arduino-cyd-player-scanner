@@ -2,7 +2,7 @@
 
 /**
  * @file Application.h
- * @brief Main application orchestrator for ALNScanner v5.0
+ * @brief Main application orchestrator for the ghost scanner
  *
  * This class integrates all HAL components, services, and the UI state machine
  * to provide the complete scanning application functionality.
@@ -190,7 +190,7 @@ private:
     /**
      * @brief Handle boot override logic (30-second DEBUG_MODE override window)
      *
-     * If any character is received on Serial within 30 seconds of boot,
+     * If any character is received on Serial within the override window,
      * force DEBUG_MODE=true to allow serial commands.
      *
      * This provides emergency access to serial commands even when
@@ -561,7 +561,7 @@ inline void Application::presentGhost(const models::TokenMetadata& token) {
 #include <esp_system.h>
 
 // ───────────────────────────────────────────────────────────────────────────
-// Boot Override Handler - 30-Second DEBUG_MODE Override Window
+// Boot Override Handler - DEBUG_MODE Override Window
 // ───────────────────────────────────────────────────────────────────────────
 
 inline void Application::handleBootOverride() {
@@ -591,10 +591,12 @@ inline void Application::handleBootOverride() {
     Serial.println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     Serial.println("     BOOT-TIME DEBUG MODE OVERRIDE");
     Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    Serial.println("Send ANY character within 30 seconds to force DEBUG_MODE");
+    Serial.printf("Send ANY character within %lu seconds to force DEBUG_MODE\n",
+                  (unsigned long)(timing::DEBUG_OVERRIDE_TIMEOUT_MS / 1000));
     Serial.println("(Allows serial commands even if config.txt has DEBUG_MODE=false)");
     Serial.println("");
-    Serial.print("Waiting (30s): ");
+    Serial.printf("Waiting (%lus): ",
+                  (unsigned long)(timing::DEBUG_OVERRIDE_TIMEOUT_MS / 1000));
 
     unsigned long overrideStart = millis();
     int lastSecond = -1;
@@ -958,7 +960,7 @@ inline void Application::printResetReason() {
 }
 
 inline void Application::printBootBanner() {
-    Serial.println("\n━━━ ALNScanner v5.0 (OOP Architecture) ━━━");
+    Serial.println("\n━━━ Ghost Scanner (standalone) ━━━");
     Serial.println("Refactored: Full HAL + Service Layer");
     Serial.printf("[BOOT] Free heap at start: %d bytes\n", ESP.getFreeHeap());
     Serial.printf("[BOOT] Chip model: ESP32, %d cores, %d MHz\n",

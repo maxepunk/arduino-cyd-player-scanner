@@ -54,7 +54,7 @@ public:
 
         Serial.println();
         Serial.println(F("═══════════════════════════════════════════════"));
-        Serial.println(F("  ALNScanner v5.0 - Serial Command Interface"));
+        Serial.println(F("  Ghost Scanner - Serial Command Interface"));
         Serial.println(F("═══════════════════════════════════════════════"));
         Serial.println();
         Serial.printf("Initialized at %lu baud\n", baudRate);
