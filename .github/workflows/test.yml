@@ -2,9 +2,9 @@ name: Test
 
 on:
   push:
-    branches: [main]
+    branches: [main, ghost-event]
   pull_request:
-    branches: [main]
+    branches: [main, ghost-event]
   workflow_dispatch:
 
 jobs:
@@ -26,3 +26,44 @@ jobs:
 
       - name: Run native tests
         run: pio test -e native
+
+  firmware-compile:
+    name: Firmware Compile (ESP32)
+    runs-on: ubuntu-latest
+
+    # Native tests exercise pure logic only and never cross-compile. This job
+    # exists because that gap let a non-compiling change (mbedTLS 3.x API
+    # rename in arduino-esp32 core 3.x) reach hardware undetected.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Cache Arduino core and tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15
+          key: arduino-esp32-3.3.2-${{ runner.os }}
+
+      - name: Install arduino-cli
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh \
+            | sh -s 1.3.1
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+
+      - name: Install ESP32 core (pinned)
+        env:
+          ESP32_INDEX: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+        run: |
+          arduino-cli core update-index --additional-urls "$ESP32_INDEX"
+          arduino-cli core install esp32:esp32@3.3.2 --additional-urls "$ESP32_INDEX"
+
+      - name: Compile firmware
+        # --libraries pins the build to the in-repo vendored copies so the
+        # result does not depend on whatever is installed on the machine.
+        run: |
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32:PartitionScheme=no_ota,UploadSpeed=921600 \
+            --libraries ./libraries \
+            --warnings default \
+            ALNScanner_v5
