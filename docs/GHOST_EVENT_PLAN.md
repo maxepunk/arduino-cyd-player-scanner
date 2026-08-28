@@ -254,10 +254,30 @@ arduino-cli compile \
 - **`card-template/`** — `config.txt` (DEVICE_ID, DEBUG_MODE, VOLUME),
   `tokens.json` pre-filled with the shipped tag IDs, and
   `assets/audio/` + `assets/images/` with `.gitkeep`.
-- **`scripts/prepare-ghost-audio.sh`** — ffmpeg wrapper producing the exact
-  target format. **Developer-side convenience only**; the documented path for
-  the card-maker is Audacity. Verified end-to-end: output confirmed as
-  `pcm_s16le / 22050 Hz / mono / 16-bit` via ffprobe.
+- **`conformer/`** — sources for the **Ghost Asset Conformer**, a
+  double-clickable folder sent to whoever prepares the card. They drop raw
+  files into `1-PUT-YOUR-FILES-HERE`, double-click, and
+  `2-READY-FOR-CARD` contains a complete card: converted audio, converted
+  images, and a generated `tokens.json`.
+
+  This replaced the original "give them an Audacity recipe" plan. That plan
+  had a hole: it specified 24-bit uncompressed BMP at 240x320 and gave them
+  no tool capable of producing it (macOS Preview cannot save BMP usefully).
+  It also put the only conversion tool in the developer's half of the
+  README, where the person who needs it can never reach it.
+
+  Generating `tokens.json` removes hand-editing JSON from their process
+  entirely — a missing comma was the most likely way to break a working
+  card. `config.txt` lives in the output folder and is never overwritten,
+  so a volume setting survives every re-run (verified).
+
+- **`scripts/build-conformer-zip.sh`** — assembles the shippable zip,
+  fetching static ffmpeg builds. Binaries are gitignored, not committed.
+
+- **`scripts/prepare-ghost-assets.sh`** — the same conversion directly from
+  a shell, for developer use. Verified end-to-end: audio confirmed as
+  `pcm_s16le / 22050 Hz / mono / 16-bit`; BMPs confirmed 240x320, 24bpp,
+  `compression == 0`, positive height, `width*3` divisible by 4.
 
 **Tag IDs are sequential** (`ghost01`, `ghost02`, …). The template ships five
 placeholder entries; the README covers adding, removing and renaming them.

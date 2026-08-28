@@ -11,8 +11,8 @@
  * Layout is fixed to the CYD's portrait orientation (240x320,
  * setRotation(0)):
  *
- *     PLACE GHOST          <- instruction, top
- *        HERE
+ *     PLACE GHOST          <- instruction, top ("WAKING UP" until
+ *        HERE                    RFID is live)
  *
  *        (ghost)           <- drawn, centre
  *
@@ -44,11 +44,11 @@ public:
     /**
      * @param rfidReady True once the RFID reader is initialized
      *
-     * When false the scanner cannot read anything — in DEBUG_MODE that is
-     * expected and deliberate, since RFID init is deferred so serial
-     * commands keep working. A guest gets no indication either way; a
-     * small dim marker appears bottom-left purely so a developer can tell
-     * at a glance why taps are doing nothing.
+     * When false the screen says WAKING UP and shows no arrow, because the
+     * scanner genuinely cannot read a tag yet — RFID is initialised after
+     * the boot-override window, and in DEBUG_MODE not at all until
+     * START_SCANNER. Showing "PLACE GHOST HERE" in that state invites a
+     * guest to try something that cannot work.
      */
     explicit GhostReadyScreen(bool rfidReady)
         : _rfidReady(rfidReady)
@@ -102,13 +102,23 @@ protected:
 
         tft.fillScreen(TFT_BLACK);
 
-        drawInstruction(tft);
-        drawGhostAt(tft, SCREEN_W / 2, 150);
-        drawArrow(tft, SCREEN_W / 2, 240);
+        if (_rfidReady) {
+            printCentred(tft, "PLACE GHOST", 3, 30, TFT_WHITE);
+            printCentred(tft, "HERE",        3, 62, TFT_WHITE);
+        } else {
+            // The scanner physically cannot read a tag yet: RFID is
+            // initialised AFTER the boot-override window. Telling a guest
+            // to place a ghost here would be a lie for ~10 seconds, and
+            // they would get no response and conclude the prop is broken.
+            printCentred(tft, "WAKING UP", 3, 30, TFT_CYAN);
+        }
 
-        if (!_rfidReady) {
-            // Developer-only tell. Deliberately tiny and dim.
-            tft.fillCircle(6, SCREEN_H - 6, 3, TFT_ORANGE);
+        drawGhostAt(tft, SCREEN_W / 2, 150);
+
+        // The arrow points at the antenna, so it only appears once the
+        // antenna is actually listening.
+        if (_rfidReady) {
+            drawArrow(tft, SCREEN_W / 2, 240);
         }
     }
 
@@ -126,11 +136,6 @@ private:
         tft.setTextColor(colour, TFT_BLACK);
         tft.setCursor((SCREEN_W - width) / 2, y);
         tft.print(text);
-    }
-
-    static void drawInstruction(TFT_eSPI& tft) {
-        printCentred(tft, "PLACE GHOST", 3, 30, TFT_WHITE);
-        printCentred(tft, "HERE",        3, 62, TFT_WHITE);
     }
 
     /**

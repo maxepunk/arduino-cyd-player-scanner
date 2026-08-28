@@ -1,0 +1,98 @@
+===============================================
+  GHOST ASSET CONFORMER
+===============================================
+
+This turns your sounds and pictures into the exact formats the ghost
+scanner can use, and prepares everything you need to copy onto the
+microSD card.
+
+You don't need to install anything. Everything is in this folder.
+
+
+-----------------------------------------------
+HOW TO USE IT
+-----------------------------------------------
+
+STEP 1
+  Put your ghost sounds into the folder:
+
+      1-PUT-YOUR-FILES-HERE
+
+  Name each file after its ghost, for example:
+
+      ghost01.mp3
+      ghost02.wav
+      ghost03.m4a
+
+  Almost any sound format works - mp3, wav, m4a, aac, flac, ogg, aiff.
+
+  Pictures are OPTIONAL. If you want one for a ghost, put it in the same
+  folder with the SAME name as the sound:
+
+      ghost01.png
+
+  Almost any picture format works - png, jpg, bmp, gif, tif, webp.
+
+STEP 2
+  Double-click:
+
+      CONFORM MY FILES        (Windows)
+      CONFORM MY FILES        (Mac)
+
+  A black window opens and tells you what it's doing. When it says
+  "Done", you can close it.
+
+STEP 3
+  Open the folder:
+
+      2-READY-FOR-CARD
+
+  Copy EVERYTHING inside it onto your microSD card. That's the whole
+  card prepared - sounds, pictures, and the ghost list.
+
+
+-----------------------------------------------
+IMPORTANT NOTES
+-----------------------------------------------
+
+* The name of each FILE is the name of the GHOST. It's what you write
+  onto the NFC tag. If your file is called ghost01.mp3, write "ghost01"
+  onto the tag.
+
+* Capital letters and spaces get tidied away automatically.
+  "Ghost 01.mp3" becomes "ghost01". Write "ghost01" on the tag.
+
+* You can run this as many times as you like. Each run replaces the
+  sounds and pictures in 2-READY-FOR-CARD with a fresh set.
+
+* Your config.txt in 2-READY-FOR-CARD is NEVER touched. That's the file
+  where you set the volume - your changes are safe.
+
+* If a file can't be converted, the window tells you which one and
+  carries on with the rest.
+
+
+-----------------------------------------------
+IF IT WON'T OPEN
+-----------------------------------------------
+
+ON A MAC
+  If you see "cannot be opened because it is from an unidentified
+  developer":
+
+      Right-click (or Control-click) on CONFORM MY FILES
+      Choose "Open"
+      Click "Open" in the box that appears
+
+  You only have to do this once.
+
+ON WINDOWS
+  If you see a blue "Windows protected your PC" box:
+
+      Click "More info"
+      Click "Run anyway"
+
+  You only have to do this once.
+
+Neither warning means anything is wrong. They appear for any program
+that wasn't bought from Apple or Microsoft.
