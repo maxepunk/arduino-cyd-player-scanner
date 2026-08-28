@@ -114,6 +114,31 @@ public:
     }
 
     /**
+     * @brief Thread-safe test for whether a path exists on the card
+     * @param path Absolute path, e.g. "/assets/audio/ghost01.wav"
+     * @return true if the card is mounted and the path exists
+     *
+     * Lets a caller decide what a token can actually present BEFORE
+     * entering a display screen, rather than letting a renderer fail and
+     * paint its own error message to the TFT. Returns false when the card
+     * is absent or the mutex cannot be acquired; callers treat that the
+     * same as "not available".
+     */
+    inline bool exists(const String& path) {
+        if (!_present) {
+            return false;
+        }
+
+        Lock lock("SDCard::exists");
+        if (!lock.acquired()) {
+            LOG_ERROR("SD-HAL", "exists() could not acquire SD mutex");
+            return false;
+        }
+
+        return SD.exists(path.c_str());
+    }
+
+    /**
      * @class Lock
      * @brief RAII lock for automatic mutex management
      *

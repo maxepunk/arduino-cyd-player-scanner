@@ -67,6 +67,22 @@ public:
         return g_touchInterruptOccurred;
     }
 
+    /**
+     * @brief Non-blocking test for whether the panel is held right now
+     *
+     * Reads the IRQ line level directly instead of consuming the interrupt
+     * flag. The XPT2046 holds TOUCH_IRQ LOW for the whole time the panel is
+     * touched, so this stays true for the duration of a press.
+     *
+     * measurePulseWidth() cannot serve this purpose: it caps at 500ms and
+     * blocks while it measures, so it can neither observe a multi-second
+     * hold nor be called from a loop that must keep polling RFID and
+     * servicing audio.
+     */
+    bool isPressed() const {
+        return digitalRead(pins::TOUCH_IRQ) == LOW;
+    }
+
     void clearTouch() {
         g_touchInterruptOccurred = false;
     }

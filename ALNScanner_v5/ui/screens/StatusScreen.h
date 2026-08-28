@@ -2,318 +2,123 @@
 
 /**
  * @file StatusScreen.h
- * @brief System status/diagnostics screen for ALNScanner v5.0
+ * @brief Hidden diagnostics screen for the ghost scanner
  *
- * Displays comprehensive system status information including:
- * - WiFi connection status with SSID and local IP
- * - Orchestrator connection state (color-coded)
- * - Queue size with visual status indicators
- * - Team ID and Device ID
- * - User instruction to dismiss screen
+ * Reached only by a deliberate 5-second long-press on the home screen —
+ * there is no on-screen hint for it. A single tap was too easy for a guest
+ * to trigger by accident, but the prop is shipped to a venue with no serial
+ * access, so some way to read its state without a laptop is essential.
  *
- * Color Coding:
- * - GREEN: Healthy/connected/empty queue
- * - YELLOW: Warning state (queue has items, orchestrator offline but WiFi OK)
- * - ORANGE: WiFi connected but orchestrator offline
- * - RED: Disconnected/full queue/error
- * - CYAN: User instructions
+ * Deliberately terse. Everything the orchestrator build showed here (WiFi
+ * SSID, local IP, orchestrator state, queue depth, team ID) is meaningless
+ * on this build and has been removed.
  *
- * Extracted from v4.1 monolithic codebase:
- * - Source: displayStatusScreen() lines 2238-2315
- * - Original implementation: Phase 8 diagnostics (FR-039 through FR-043)
- *
- * Design Patterns:
- * - Stateless rendering (all state passed via SystemStatus struct)
- * - Template method pattern (via Screen base class)
- * - Dependency injection (DisplayDriver reference)
- *
- * Thread Safety:
- * - Read-only rendering (no state mutation)
- * - Caller responsible for thread-safe SystemStatus construction
+ * Design: stateless rendering; all state arrives via SystemStatus.
  *
  * @namespace ui
- * @author ALNScanner v5.0 Refactoring Team
- * @date October 22, 2025
  */
 
 #include "../Screen.h"
-#include "../../models/ConnectionState.h"
 #include "../../hal/DisplayDriver.h"
 
 namespace ui {
 
 /**
  * @class StatusScreen
- * @brief Diagnostics screen showing system health and configuration
- *
- * Usage Example:
- * @code
- * // Construct status data structure
- * StatusScreen::SystemStatus status;
- * status.connState = connectionStateHolder.get();
- * status.wifiSSID = WiFi.SSID();
- * status.localIP = WiFi.localIP().toString();
- * status.queueSize = queueService.getSize();
- * status.maxQueueSize = 100;
- * status.teamID = config.teamID;
- * status.deviceID = config.deviceID;
- *
- * // Create and render screen
- * StatusScreen screen(status);
- * auto& display = hal::DisplayDriver::getInstance();
- * screen.render(display);
- * @endcode
+ * @brief Hidden diagnostics readout
  */
 class StatusScreen : public Screen {
 public:
     /**
      * @struct SystemStatus
-     * @brief Complete system status snapshot for rendering
-     *
-     * All fields are captured at construction time to ensure
-     * consistent rendering even if underlying state changes
-     * during the render operation.
+     * @brief Status snapshot, captured at construction for consistent render
      */
     struct SystemStatus {
-        models::ConnectionState connState;  // Current connection state
-        String wifiSSID;                    // WiFi network name (empty if disconnected)
-        String localIP;                     // Local IP address (empty if disconnected)
-        int queueSize;                      // Current number of queued scans
-        int maxQueueSize;                   // Queue capacity (typically 100)
-        String teamID;                      // Team identifier (e.g., "001")
-        String deviceID;                    // Device identifier (e.g., "SCANNER_FLOOR1_001")
+        String deviceID;    ///< Which prop this is (e.g. "SCANNER_004")
+        int    ghostCount;  ///< Ghosts loaded from /tokens.json
+        bool   rfidReady;   ///< RFID reader initialized
+        bool   sdPresent;   ///< SD card mounted
+        float  volume;      ///< Configured playback gain
+        int    freeHeap;    ///< Free heap in bytes
     };
 
-    /**
-     * @brief Construct status screen with given system state
-     * @param status Complete system status snapshot
-     *
-     * The status parameter is captured by value to ensure
-     * thread-safe rendering even if source data changes.
-     */
-    StatusScreen(const SystemStatus& status)
-        : _status(status) {
+    explicit StatusScreen(const SystemStatus& status)
+        : _status(status)
+    {
     }
 
+    virtual ~StatusScreen() = default;
+
 protected:
-    /**
-     * @brief Render status screen to display
-     * @param display Reference to DisplayDriver singleton
-     *
-     * Rendering Layout:
-     * 
-     *  --- DIAGNOSTICS ---         
-     *                              
-     *  WiFi: [SSID or DISCONNECTED]
-     *    IP: [x.x.x.x]             
-     *                              
-     *  Orchestrator: [STATE]       
-     *                              
-     *  Queue: [N scans/FULL]       
-     *                              
-     *  Team: [XXX]                 
-     *  Device: [SCANNER_XXX]       
-     *                              
-     *  Tap again to close          
-     * 
-     *
-     * Extracted from v4.1 lines 2238-2315:
-     * - Line 2243: fillScreen(TFT_BLACK)
-     * - Lines 2244-2245: setTextSize(2), setCursor(0,0)
-     * - Lines 2248-2250: Title header
-     * - Lines 2252-2266: WiFi status (FR-039)
-     * - Lines 2268-2281: Orchestrator status (FR-040)
-     * - Lines 2283-2297: Queue status (FR-041, T138)
-     * - Lines 2299-2308: Team ID (FR-042) and Device ID (FR-043)
-     * - Lines 2310-2311: User instruction
-     *
-     * Color Coding Logic (preserved from v4.1):
-     * - WiFi: GREEN if connected, RED if disconnected
-     * - Orchestrator: GREEN if ORCH_CONNECTED, ORANGE if ORCH_WIFI_CONNECTED, RED otherwise
-     * - Queue: GREEN if empty, YELLOW if 1-99, RED if full (>=maxQueueSize)
-     * - Labels: WHITE for field names
-     * - Instructions: CYAN for user guidance
-     */
     void onRender(hal::DisplayDriver& display) override {
         auto& tft = display.getTFT();
 
-        // Clear screen and setup text
         tft.fillScreen(TFT_BLACK);
+        tft.setCursor(0, 10);
         tft.setTextSize(2);
-        tft.setCursor(0, 0);
 
-        // Title header (lines 2247-2250)
-        tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-        tft.println("--- DIAGNOSTICS ---");
-        tft.println("");
-
-        // WiFi Status (FR-039, lines 2252-2266)
-        tft.setTextColor(TFT_WHITE, TFT_BLACK);
-        tft.print("WiFi: ");
-        if (_status.connState == models::ORCH_DISCONNECTED) {
-            tft.setTextColor(TFT_RED, TFT_BLACK);
-            tft.println("DISCONNECTED");
-        } else {
-            tft.setTextColor(TFT_GREEN, TFT_BLACK);
-            tft.println(_status.wifiSSID);
-            tft.setTextColor(TFT_WHITE, TFT_BLACK);
-            tft.print("  IP: ");
-            tft.println(_status.localIP);
-        }
-        tft.println("");
-
-        // Orchestrator Status (FR-040, lines 2268-2281)
-        tft.setTextColor(TFT_WHITE, TFT_BLACK);
-        tft.print("Orchestrator: ");
-        if (_status.connState == models::ORCH_CONNECTED) {
-            tft.setTextColor(TFT_GREEN, TFT_BLACK);
-            tft.println("CONNECTED");
-        } else if (_status.connState == models::ORCH_WIFI_CONNECTED) {
-            tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-            tft.println("OFFLINE");
-        } else {
-            tft.setTextColor(TFT_RED, TFT_BLACK);
-            tft.println("OFFLINE");
-        }
-        tft.println("");
-
-        // Queue Size (FR-041 & T138, lines 2283-2297)
-        tft.setTextColor(TFT_WHITE, TFT_BLACK);
-        tft.print("Queue: ");
-        if (_status.queueSize >= _status.maxQueueSize) {
-            tft.setTextColor(TFT_RED, TFT_BLACK);
-            tft.printf("%d (FULL)\n", _status.queueSize);
-        } else if (_status.queueSize > 0) {
-            tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-            tft.printf("%d scans\n", _status.queueSize);
-        } else {
-            tft.setTextColor(TFT_GREEN, TFT_BLACK);
-            tft.println("0 scans");
-        }
-        tft.println("");
-
-        // Team ID (FR-042, lines 2299-2302)
-        tft.setTextColor(TFT_WHITE, TFT_BLACK);
-        tft.print("Team: ");
-        tft.println(_status.teamID);
-
-        // Device ID (FR-043, lines 2304-2308)
-        tft.setTextColor(TFT_WHITE, TFT_BLACK);
-        tft.print("Device: ");
-        tft.println(_status.deviceID);
-        tft.println("");
-
-        // User instruction (lines 2310-2311)
         tft.setTextColor(TFT_CYAN, TFT_BLACK);
-        tft.println("Tap again to close");
+        tft.println(" STATUS");
+        tft.println("");
+
+        tft.setTextSize(1);
+
+        // Device identity — the reason DEVICE_ID still exists on this build
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        tft.print(" Device:  ");
+        tft.setTextColor(TFT_CYAN, TFT_BLACK);
+        tft.println(_status.deviceID.length() ? _status.deviceID : "(unset)");
+
+        // SD card — if this is wrong, nothing else works
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        tft.print(" SD card: ");
+        if (_status.sdPresent) {
+            tft.setTextColor(TFT_GREEN, TFT_BLACK);
+            tft.println("present");
+        } else {
+            tft.setTextColor(TFT_RED, TFT_BLACK);
+            tft.println("ABSENT");
+        }
+
+        // Ghost count — zero means tokens.json is missing or malformed
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        tft.print(" Ghosts:  ");
+        if (_status.ghostCount > 0) {
+            tft.setTextColor(TFT_GREEN, TFT_BLACK);
+            tft.printf("%d loaded\n", _status.ghostCount);
+        } else {
+            tft.setTextColor(TFT_RED, TFT_BLACK);
+            tft.println("NONE LOADED");
+        }
+
+        // RFID — in debug mode this is deliberately deferred, not broken
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        tft.print(" RFID:    ");
+        if (_status.rfidReady) {
+            tft.setTextColor(TFT_GREEN, TFT_BLACK);
+            tft.println("ready");
+        } else {
+            tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+            tft.println("not started");
+        }
+
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        tft.print(" Volume:  ");
+        tft.setTextColor(TFT_CYAN, TFT_BLACK);
+        tft.printf("%.2f\n", _status.volume);
+
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        tft.print(" Heap:    ");
+        tft.setTextColor(TFT_CYAN, TFT_BLACK);
+        tft.printf("%d bytes\n", _status.freeHeap);
+
+        tft.println("");
+        tft.setTextColor(TFT_CYAN, TFT_BLACK);
+        tft.println(" Tap to dismiss");
     }
 
 private:
-    SystemStatus _status;  // Captured status at construction time
+    SystemStatus _status;
 };
 
 } // namespace ui
-
-/**
- * EXTRACTION NOTES
- *
- * Source Mapping:
- * ===============
- * v4.1 displayStatusScreen() � StatusScreen::onRender()
- * Lines 2238-2315 (78 lines) � Lines 142-213 (72 lines)
- *
- * Refactoring Changes:
- * ====================
- * 1. Removed serial logging (lines 2239-2241, 2313-2314)
- *    - v4.1: Serial.println("[PHASE8-DIAG] ...")
- *    - v5.0: Logging handled by caller, not UI layer
- *
- * 2. Removed timing instrumentation (lines 2241, 2313-2314)
- *    - v4.1: startMs, latencyMs tracking
- *    - v5.0: Performance monitoring handled by UIStateMachine
- *
- * 3. Extracted global variable reads into SystemStatus struct
- *    - v4.1: getConnectionState(), wifiSSID, WiFi.localIP(), etc.
- *    - v5.0: All data passed via constructor parameter
- *
- * 4. Changed display parameter from global tft to DisplayDriver reference
- *    - v4.1: tft.fillScreen() (global TFT_eSPI object)
- *    - v5.0: display.getTFT().fillScreen() (singleton pattern)
- *
- * 5. Added namespace wrapping (ui::)
- *    - v4.1: Global scope
- *    - v5.0: ui::StatusScreen (organized architecture)
- *
- * Preserved Logic:
- * ================
- * - Exact color coding (GREEN/YELLOW/ORANGE/RED/CYAN)
- * - Exact text layout and spacing
- * - Exact conditional logic for status indicators
- * - Exact printf format strings
- * - Functional requirements FR-039 through FR-043
- *
- * Dependencies:
- * =============
- * - ui::Screen (base class with template method pattern)
- * - models::ConnectionState (enum for connection states)
- * - hal::DisplayDriver (singleton for TFT access)
- * - TFT_eSPI color constants (TFT_BLACK, TFT_WHITE, etc.)
- *
- * Design Patterns:
- * ================
- * 1. Template Method Pattern
- *    - Base class Screen defines render() template
- *    - Subclass implements onRender() hook
- *
- * 2. Dependency Injection
- *    - DisplayDriver passed as reference
- *    - SystemStatus passed as constructor parameter
- *
- * 3. Value Object Pattern
- *    - SystemStatus captures immutable snapshot of system state
- *    - Thread-safe because values don't change after construction
- *
- * Thread Safety:
- * ==============
- * - onRender() is read-only (no state mutation)
- * - SystemStatus is captured by value (not by reference)
- * - Caller responsible for thread-safe construction of SystemStatus
- * - DisplayDriver assumed to be accessed from single thread (main loop)
- *
- * Visual Appearance:
- * ==================
- * Identical to v4.1 status screen:
- * - Same font size (2)
- * - Same layout (title, blank line, status sections, instruction)
- * - Same colors (status-dependent)
- * - Same text content (labels and values)
- *
- * Testing Strategy:
- * =================
- * 1. Unit test: Verify render logic with mock DisplayDriver
- * 2. Integration test: Compare screenshot with v4.1 baseline
- * 3. Edge cases:
- *    - WiFi disconnected (ORCH_DISCONNECTED)
- *    - WiFi connected, orchestrator offline (ORCH_WIFI_CONNECTED)
- *    - Fully connected (ORCH_CONNECTED)
- *    - Empty queue (0 scans)
- *    - Partial queue (1-99 scans)
- *    - Full queue (100 scans)
- *    - Long device ID (test text wrapping)
- *
- * Flash Size Impact:
- * ==================
- * Estimated: ~100 lines (inline header-only)
- * Expected flash increase: ~500-800 bytes (includes vtable)
- * Offset by: Removal of global displayStatusScreen() function
- * Net impact: Minimal (likely neutral or slight reduction)
- *
- * Future Enhancements:
- * ====================
- * 1. Add memory usage statistics (free heap, largest block)
- * 2. Add RFID scan statistics (success rate, error counts)
- * 3. Add uptime display (time since boot)
- * 4. Add last sync timestamp (when queue was last uploaded)
- * 5. Add scrolling support for long device IDs
- * 6. Add color legend (explain GREEN/YELLOW/RED meanings)
- */

@@ -47,7 +47,7 @@ namespace services {
  *
  * // Access current configuration
  * models::DeviceConfig& cfg = config.getConfig();
- * Serial.println(cfg.wifiSSID);
+ * Serial.println(cfg.deviceID);
  *
  * // Runtime editing
  * config.set("WIFI_SSID", "NewNetwork");
@@ -143,33 +143,21 @@ public:
 
             LOG_DEBUG("[CONFIG] Line %d: '%s' = '%s'\n", lineNum, key.c_str(), value.c_str());
 
-            // Update configuration
-            if (key == "WIFI_SSID") {
-                _config.wifiSSID = value;
-                parsedKeys++;
-            } else if (key == "WIFI_PASSWORD") {
-                _config.wifiPassword = value;
-                parsedKeys++;
-            } else if (key == "ORCHESTRATOR_URL") {
-                _config.orchestratorURL = value;
-                parsedKeys++;
-            } else if (key == "TEAM_ID") {
-                _config.teamID = value;
-                parsedKeys++;
-            } else if (key == "DEVICE_ID") {
+            // Update configuration. Keys removed with the orchestrator
+            // (WIFI_SSID, WIFI_PASSWORD, ORCHESTRATOR_URL, TEAM_ID,
+            // SYNC_TOKENS, SYNC_ASSETS) now fall through to the
+            // unknown-key branch and are ignored, so a card carrying an
+            // old ALN config.txt still boots.
+            if (key == "DEVICE_ID") {
                 _config.deviceID = value;
-                parsedKeys++;
-            } else if (key == "SYNC_TOKENS") {
-                _config.syncTokens = !(value.equalsIgnoreCase("false") || value == "0");
-                LOG_DEBUG("[CONFIG]       SYNC_TOKENS set to %s\n", _config.syncTokens ? "TRUE" : "FALSE");
-                parsedKeys++;
-            } else if (key == "SYNC_ASSETS") {
-                _config.syncAssets = !(value.equalsIgnoreCase("false") || value == "0");
-                LOG_DEBUG("[CONFIG]       SYNC_ASSETS set to %s\n", _config.syncAssets ? "TRUE" : "FALSE");
                 parsedKeys++;
             } else if (key == "DEBUG_MODE") {
                 _config.debugMode = !(value.equalsIgnoreCase("false") || value == "0");
                 LOG_DEBUG("[CONFIG]       DEBUG_MODE set to %s\n", _config.debugMode ? "TRUE" : "FALSE");
+                parsedKeys++;
+            } else if (key == "VOLUME") {
+                _config.volume = value.toFloat();
+                LOG_DEBUG("[CONFIG]       VOLUME set to %.2f\n", _config.volume);
                 parsedKeys++;
             } else {
                 LOG_DEBUG("[CONFIG]         (unknown key, ignored)\n");
@@ -180,14 +168,9 @@ public:
 
         LOG_INFO("[CONFIG] Parsed %d lines, %d recognized keys\n", lineNum, parsedKeys);
         LOG_INFO("[CONFIG] Results:\n");
-        LOG_INFO("  WIFI_SSID: %s\n", _config.wifiSSID.length() > 0 ? _config.wifiSSID.c_str() : "(not set)");
-        LOG_INFO("  WIFI_PASSWORD: %s\n", _config.wifiPassword.length() > 0 ? "***" : "(not set)");
-        LOG_INFO("  ORCHESTRATOR_URL: %s\n", _config.orchestratorURL.length() > 0 ? _config.orchestratorURL.c_str() : "(not set)");
-        LOG_INFO("  TEAM_ID: %s\n", _config.teamID.length() > 0 ? _config.teamID.c_str() : "(not set)");
         LOG_INFO("  DEVICE_ID: %s\n", _config.deviceID.length() > 0 ? _config.deviceID.c_str() : "(auto-generate)");
-        LOG_INFO("  SYNC_TOKENS: %s\n", _config.syncTokens ? "true" : "false");
-        LOG_INFO("  SYNC_ASSETS: %s\n", _config.syncAssets ? "true" : "false");
         LOG_INFO("  DEBUG_MODE: %s\n", _config.debugMode ? "true" : "false");
+        LOG_INFO("  VOLUME: %.2f\n", _config.volume);
         LOG_INFO("[CONFIG] Free heap after parsing: %d bytes\n", ESP.getFreeHeap());
 
         // Auto-generate device ID if not set
@@ -241,18 +224,9 @@ public:
         file.println("");
 
         // Write all configuration fields
-        file.printf("WIFI_SSID=%s\n", _config.wifiSSID.c_str());
-        file.printf("WIFI_PASSWORD=%s\n", _config.wifiPassword.c_str());
-        file.printf("ORCHESTRATOR_URL=%s\n", _config.orchestratorURL.c_str());
-        file.printf("TEAM_ID=%s\n", _config.teamID.c_str());
-
-        // Only write DEVICE_ID if set (skip if empty)
-        if (_config.deviceID.length() > 0) {
-            file.printf("DEVICE_ID=%s\n", _config.deviceID.c_str());
-        }
-
-        file.printf("SYNC_TOKENS=%s\n", _config.syncTokens ? "true" : "false");
-        file.printf("SYNC_ASSETS=%s\n", _config.syncAssets ? "true" : "false");
+        file.printf("DEVICE_ID=%s\n", _config.deviceID.c_str());
+        file.printf("DEBUG_MODE=%s\n", _config.debugMode ? "true" : "false");
+        file.printf("VOLUME=%.2f\n", _config.volume);
         file.printf("DEBUG_MODE=%s\n", _config.debugMode ? "true" : "false");
 
         file.flush();
@@ -273,29 +247,14 @@ public:
      * Boolean keys accept "true"/"false", "1"/"0", case-insensitive.
      */
     inline bool set(const String& key, const String& value) {
-        if (key == "WIFI_SSID") {
-            _config.wifiSSID = value;
-            return true;
-        } else if (key == "WIFI_PASSWORD") {
-            _config.wifiPassword = value;
-            return true;
-        } else if (key == "ORCHESTRATOR_URL") {
-            _config.orchestratorURL = value;
-            return true;
-        } else if (key == "TEAM_ID") {
-            _config.teamID = value;
-            return true;
-        } else if (key == "DEVICE_ID") {
+        if (key == "DEVICE_ID") {
             _config.deviceID = value;
-            return true;
-        } else if (key == "SYNC_TOKENS") {
-            _config.syncTokens = !(value.equalsIgnoreCase("false") || value == "0");
-            return true;
-        } else if (key == "SYNC_ASSETS") {
-            _config.syncAssets = !(value.equalsIgnoreCase("false") || value == "0");
             return true;
         } else if (key == "DEBUG_MODE") {
             _config.debugMode = !(value.equalsIgnoreCase("false") || value == "0");
+            return true;
+        } else if (key == "VOLUME") {
+            _config.volume = value.toFloat();
             return true;
         }
 
@@ -304,131 +263,28 @@ public:
 
     /**
      * @brief Validate current configuration
-     * @return true if all fields valid, false if any validation fails
+     * @return true if the configuration is usable
      *
-     * Checks:
-     * - WIFI_SSID: required, 1-32 characters
-     * - WIFI_PASSWORD: optional, 0-63 characters
-     * - ORCHESTRATOR_URL: required, starts with "http://", 10-200 characters
-     * - TEAM_ID: required, exactly 3 digits
-     * - DEVICE_ID: optional, 1-100 characters, alphanumeric + underscore
-     * - SYNC_TOKENS: always valid (boolean)
-     * - DEBUG_MODE: always valid (boolean)
+     * Delegates to DeviceConfig::validate(), which is the single source of
+     * truth for the rules and is also what the native unit tests exercise.
+     * The orchestrator build duplicated every rule here with its own
+     * logging; that duplication is what let the two drift.
      */
     inline bool validate() {
         LOG_INFO("\n[VALIDATE] === CONFIG VALIDATION START ===\n");
-        bool isValid = true;
 
-        // Validate WIFI_SSID (required, 1-32 characters)
-        if (_config.wifiSSID.length() == 0) {
-            LOG_INFO("[VALIDATE] X WIFI_SSID is required\n");
-            isValid = false;
-        } else if (_config.wifiSSID.length() > limits::MAX_SSID_LENGTH) {
-            LOG_INFO("[VALIDATE] X WIFI_SSID too long (max %d characters)\n", limits::MAX_SSID_LENGTH);
-            isValid = false;
-        } else {
-            LOG_DEBUG("[VALIDATE] + WIFI_SSID valid: %s\n", _config.wifiSSID.c_str());
-        }
-
-        // Validate WIFI_PASSWORD (optional, 0-63 characters)
-        if (_config.wifiPassword.length() > limits::MAX_PASSWORD_LENGTH) {
-            LOG_INFO("[VALIDATE] X WIFI_PASSWORD too long (max %d characters)\n", limits::MAX_PASSWORD_LENGTH);
-            isValid = false;
-        } else {
-            LOG_DEBUG("[VALIDATE] + WIFI_PASSWORD valid\n");
-        }
-
-        // Validate ORCHESTRATOR_URL (required, starts with http:// or https://, 10-200 characters)
-        if (_config.orchestratorURL.length() == 0) {
-            LOG_INFO("[VALIDATE] X ORCHESTRATOR_URL is required\n");
-            isValid = false;
-        } else if (!_config.orchestratorURL.startsWith("http://") && !_config.orchestratorURL.startsWith("https://")) {
-            LOG_INFO("[VALIDATE] X ORCHESTRATOR_URL must start with http:// or https://\n");
-            isValid = false;
-        } else if (_config.orchestratorURL.length() < 10 || _config.orchestratorURL.length() > 200) {
-            LOG_INFO("[VALIDATE] X ORCHESTRATOR_URL invalid length (10-200 characters)\n");
-            isValid = false;
-        } else {
-            // Auto-upgrade http:// to https:// for backward compatibility
-            if (_config.orchestratorURL.startsWith("http://")) {
-                _config.orchestratorURL.replace("http://", "https://");
-                LOG_INFO("[VALIDATE] Auto-upgraded URL: http:// -> https://\n");
-            }
-            LOG_DEBUG("[VALIDATE] + ORCHESTRATOR_URL valid: %s\n", _config.orchestratorURL.c_str());
-        }
-
-        // Validate TEAM_ID (required, exactly 3 digits)
-        if (_config.teamID.length() == 0) {
-            LOG_INFO("[VALIDATE] X TEAM_ID is required\n");
-            isValid = false;
-        } else if (_config.teamID.length() != limits::TEAM_ID_LENGTH) {
-            LOG_INFO("[VALIDATE] X TEAM_ID must be exactly %d digits\n", limits::TEAM_ID_LENGTH);
-            isValid = false;
-        } else {
-            // Check all characters are digits
-            bool allDigits = true;
-            for (int i = 0; i < limits::TEAM_ID_LENGTH; i++) {
-                if (!isDigit(_config.teamID[i])) {
-                    allDigits = false;
-                    break;
-                }
-            }
-            if (!allDigits) {
-                LOG_INFO("[VALIDATE] X TEAM_ID must contain only digits\n");
-                isValid = false;
-            } else {
-                LOG_DEBUG("[VALIDATE] + TEAM_ID valid: %s\n", _config.teamID.c_str());
-            }
-        }
-
-        // Validate DEVICE_ID (optional, 1-100 characters, alphanumeric + underscore)
-        if (_config.deviceID.length() > 0) {
-            if (_config.deviceID.length() > limits::MAX_DEVICE_ID_LENGTH) {
-                LOG_INFO("[VALIDATE] X DEVICE_ID too long (max %d characters)\n", limits::MAX_DEVICE_ID_LENGTH);
-                isValid = false;
-            } else {
-                // Check all characters are alphanumeric or underscore
-                bool validChars = true;
-                for (unsigned int i = 0; i < _config.deviceID.length(); i++) {
-                    char c = _config.deviceID[i];
-                    if (!isAlphaNumeric(c) && c != '_') {
-                        validChars = false;
-                        break;
-                    }
-                }
-                if (!validChars) {
-                    LOG_INFO("[VALIDATE] X DEVICE_ID must contain only letters, numbers, and underscores\n");
-                    isValid = false;
-                } else {
-                    LOG_DEBUG("[VALIDATE] + DEVICE_ID valid: %s\n", _config.deviceID.c_str());
-                }
-            }
-        }
-
-        // SYNC_TOKENS, SYNC_ASSETS and DEBUG_MODE are always valid (boolean)
-        LOG_DEBUG("[VALIDATE] + SYNC_TOKENS valid: %s\n", _config.syncTokens ? "true" : "false");
-        LOG_DEBUG("[VALIDATE] + SYNC_ASSETS valid: %s\n", _config.syncAssets ? "true" : "false");
-        LOG_DEBUG("[VALIDATE] + DEBUG_MODE valid: %s\n", _config.debugMode ? "true" : "false");
+        const bool isValid = _config.validate();
 
         if (isValid) {
-            LOG_INFO("[VALIDATE] +++ SUCCESS +++ All fields valid\n");
+            LOG_INFO("[VALIDATE] + DEVICE_ID: %s\n",
+                     _config.deviceID.length() > 0 ? _config.deviceID.c_str() : "(auto-generate)");
+            LOG_INFO("[VALIDATE] + VOLUME: %.2f\n", _config.volume);
+            LOG_INFO("[VALIDATE] === VALID ===\n");
         } else {
-            LOG_INFO("[VALIDATE] XXX FAILURE XXX Configuration has errors\n");
+            LOG_ERROR("VALIDATE", "DEVICE_ID exceeds maximum length");
         }
 
-        LOG_INFO("[VALIDATE] === CONFIG VALIDATION END ===\n\n");
         return isValid;
-    }
-
-    /**
-     * @brief Get reference to current configuration
-     * @return Reference to internal DeviceConfig structure
-     *
-     * Allows direct access to configuration fields:
-     * config.getConfig().wifiSSID, config.getConfig().teamID, etc.
-     */
-    inline models::DeviceConfig& getConfig() {
-        return _config;
     }
 
     /**

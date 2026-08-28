@@ -2,30 +2,23 @@
 
 /**
  * @file ScanFailedScreen.h
- * @brief Non-blocking scan failure screen for ALNScanner v5.0
+ * @brief Non-blocking failure feedback, phrased in-world
  *
- * Displays a short, non-blocking "SCAN FAILED" message when an RFID scan
- * cannot be processed. Unlike DISPLAYING_TOKEN / SHOWING_STATUS / PROCESSING_VIDEO,
- * the SCAN_FAILED state does NOT block RFID scanning — the next tap works
- * immediately. Paired with UIStateMachine::isBlockingRFID() returning false
- * for SCAN_FAILED, this means a failed scan does not prevent the player
- * from re-tapping the same or another token right away.
+ * Shown when a tap cannot produce a ghost. Three distinct causes share this
+ * screen, deliberately:
+ *   - the tag could not be read (comms or NDEF failure)
+ *   - the tag was read but its id is not in the database
+ *   - the id is known but the card carries neither audio nor image
  *
- * Failure reasons this screen is used for:
- * - "COMM FAILED"    : detectCard returned DetectResult::CommFailed
- * - "READ FAILED"    : NDEF extraction exhausted retries
- * - "UNKNOWN TOKEN"  : NDEF extracted cleanly but tokenId not in database
+ * A guest must not be able to tell these apart — a diagnostic string in
+ * front of an audience reads as a broken machine, and the first two are
+ * indistinguishable to them anyway ("it didn't work, try again"). The
+ * reason is therefore logged to serial and never rendered.
  *
- * Visual Layout:
+ * Unlike DISPLAYING_TOKEN, this state does NOT block RFID. A guest can
+ * re-tap immediately without waiting for the screen to clear.
  *
- *   SCAN FAILED      (large, red)
- *
- *   <reason>         (orange)
- *
- *   Try again...     (small, cyan)
- *
- * Auto-dismisses after timing::SCAN_FAILED_TIMEOUT_MS (~1.5s). Also
- * dismisses on any tap. Either dismissal returns to READY state.
+ * @namespace ui
  */
 
 #include "../Screen.h"
@@ -35,57 +28,45 @@ namespace ui {
 
 /**
  * @class ScanFailedScreen
- * @brief Transient failure feedback screen (non-blocking)
- *
- * Rendered when an RFID scan cannot produce a displayable token. The
- * `reason` string is caller-provided so the screen can differentiate
- * between distinct failure modes without this class needing to know
- * about the RFID internals.
- *
- * Design pattern: Stateless rendering (reason passed to constructor).
+ * @brief In-world "that didn't work" feedback
  */
 class ScanFailedScreen : public Screen {
 public:
     /**
-     * @brief Construct failure screen with a short reason string
-     * @param reason Short human-readable label (e.g. "READ FAILED",
-     *               "COMM FAILED", "UNKNOWN TOKEN"). Keep under ~16
-     *               characters so it fits on a single line at text size 2.
+     * @param reason Diagnostic string, logged to serial only — never drawn
      */
     explicit ScanFailedScreen(const String& reason)
         : _reason(reason)
     {
+        LOG_INFO("[SCAN-FAILED] Showing failure screen (reason: %s)\n", _reason.c_str());
     }
 
     virtual ~ScanFailedScreen() = default;
+
+    static constexpr int16_t SCREEN_W = 240;
 
 protected:
     void onRender(hal::DisplayDriver& display) override {
         auto& tft = display.getTFT();
 
         tft.fillScreen(TFT_BLACK);
-        tft.setCursor(0, 80);
 
-        // Large red header
-        tft.setTextColor(TFT_RED, TFT_BLACK);
-        tft.setTextSize(3);
-        tft.println(" SCAN FAILED");
-        tft.println("");
-
-        // Orange reason line
-        tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-        tft.setTextSize(2);
-        tft.println(" " + _reason);
-        tft.println("");
-
-        // Small cyan retry hint
-        tft.setTextColor(TFT_CYAN, TFT_BLACK);
-        tft.setTextSize(1);
-        tft.println(" Try again...");
+        printCentred(tft, "THAT'S NO", 3, 110, TFT_WHITE);
+        printCentred(tft, "SPIRIT",    3, 145, TFT_WHITE);
+        printCentred(tft, "TRY AGAIN", 2, 195, TFT_CYAN);
     }
 
 private:
-    String _reason;
+    static void printCentred(TFT_eSPI& tft, const char* text,
+                             uint8_t size, int16_t y, uint16_t colour) {
+        const int16_t width = (int16_t)(6 * size * strlen(text));
+        tft.setTextSize(size);
+        tft.setTextColor(colour, TFT_BLACK);
+        tft.setCursor((SCREEN_W - width) / 2, y);
+        tft.print(text);
+    }
+
+    String _reason;  ///< Serial diagnostics only
 };
 
 } // namespace ui

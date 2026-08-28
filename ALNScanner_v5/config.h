@@ -20,10 +20,11 @@ namespace pins {
     constexpr uint8_t RFID_MISO = 35;
     constexpr uint8_t RFID_SS   = 3;
 
-    // Audio (I2S DAC)
-    constexpr uint8_t AUDIO_BCLK = 26;
-    constexpr uint8_t AUDIO_LRC  = 25;
-    constexpr uint8_t AUDIO_DIN  = 22;
+    // NOTE: there are deliberately no AUDIO_BCLK/LRC/DIN constants here.
+    // Audio uses AudioOutputI2S(0, 1) — internal DAC mode, driving GPIO
+    // 25/26 directly — so external I2S pins are never configured. The
+    // constants that used to sit here were referenced nowhere and wrongly
+    // implied an AUDIO_DIN/RFID_SCK conflict on GPIO 22 that cannot occur.
 
     // DAC Silence Pins (prevent beeping)
     constexpr uint8_t DAC_SILENCE_1 = 25;
@@ -39,9 +40,18 @@ namespace timing {
     constexpr uint32_t TOUCH_PULSE_WIDTH_THRESHOLD_US = 10000;
     constexpr uint32_t PROCESSING_MODAL_TIMEOUT_MS = 2500;
     constexpr uint32_t SCAN_FAILED_TIMEOUT_MS = 1500;  // Non-blocking failure screen auto-dismiss
+    // Deliberate hold that reveals the hidden status screen. Long enough
+    // that a guest brushing the panel cannot reach it by accident, short
+    // enough that a technician holding it does not assume it is broken.
+    constexpr uint32_t LONG_PRESS_MS = 5000;
+    // Fallback dismissal when a ghost HAS an audio file on the card but the
+    // decoder refused it (wrong bit depth, wrong container, truncated file).
+    // Without this the screen would never auto-clear, because there is no
+    // playback whose end could trigger it.
+    constexpr uint32_t SILENT_GHOST_TIMEOUT_MS = 4000;
     constexpr uint32_t ORCHESTRATOR_CHECK_INTERVAL_MS = 10000;
     constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 10000;
-    constexpr uint32_t DEBUG_OVERRIDE_TIMEOUT_MS = 30000;
+    constexpr uint32_t DEBUG_OVERRIDE_TIMEOUT_MS = 10000;
 }
 
 // PPP RFID CONFIGURATION PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
@@ -86,6 +96,13 @@ namespace paths {
 // PPP SIZE LIMITS PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
 
 namespace limits {
+    // Playback gain written to AudioOutput::SetGain(). The underlying API
+    // accepts up to 4.0 but clips hard well before that on the internal
+    // DAC, so config.txt values are clamped to a range that stays usable.
+    constexpr float DEFAULT_VOLUME = 1.0f;
+    constexpr float MIN_VOLUME     = 0.0f;
+    constexpr float MAX_VOLUME     = 2.0f;
+
     constexpr int MAX_TOKENS = 50;
     constexpr int MAX_TOKEN_DB_SIZE = 50000; // 50KB
     // Wire-format ceiling for the manifest payload. Device refuses anything

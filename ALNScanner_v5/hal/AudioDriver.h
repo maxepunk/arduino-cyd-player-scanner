@@ -72,7 +72,13 @@ public:
             return false;
         }
 
-        LOG_INFO("[AUDIO-HAL] AudioOutputI2S created successfully\n");
+        // Apply the configured gain as soon as the output exists. Lazy init
+        // means this is the first opportunity; setVolume() may well have
+        // been called before any playback, so _gain already holds the
+        // wanted value.
+        _output->SetGain(_gain);
+
+        LOG_INFO("[AUDIO-HAL] AudioOutputI2S created successfully (gain %.2f)\n", _gain);
         _initialized = true;
         return true;
     }
@@ -106,6 +112,24 @@ public:
      *
      * Note: SD card must be initialized and mounted before calling
      */
+    /**
+     * @brief Set playback gain
+     * @param gain 0.0 (silent) upward; ~1.0 is unity
+     *
+     * Safe to call before initialization: the value is stored and applied
+     * when the output is lazily created, and applied immediately if it
+     * already exists. Range clamping is the config layer's job
+     * (limits::MIN_VOLUME / MAX_VOLUME) — the underlying SetGain() accepts
+     * up to 4.0 but clips hard on the internal DAC long before that.
+     */
+    void setVolume(float gain) {
+        _gain = gain;
+        if (_output) {
+            _output->SetGain(_gain);
+        }
+        LOG_INFO("[AUDIO-HAL] Gain set to %.2f\n", _gain);
+    }
+
     bool play(const String& path) {
         LOG_DEBUG("[AUDIO-HAL] play() called for: %s\n", path.c_str());
 
@@ -230,6 +254,7 @@ private:
     static AudioGeneratorWAV* _generator;
     static AudioFileSourceSD* _source;
     static bool _initialized;
+    static float _gain;              // Playback gain, applied on lazy init
 };
 
 // Static member initialization
@@ -237,5 +262,6 @@ AudioOutputI2S* AudioDriver::_output = nullptr;
 AudioGeneratorWAV* AudioDriver::_generator = nullptr;
 AudioFileSourceSD* AudioDriver::_source = nullptr;
 bool AudioDriver::_initialized = false;
+float AudioDriver::_gain = 1.0f;
 
 } // namespace hal

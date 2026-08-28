@@ -36,8 +36,6 @@
 #include "hal/SDCard.h"
 #include "services/ConfigService.h"
 #include "services/TokenService.h"
-#include "services/AssetService.h"
-#include "services/OrchestratorService.h"
 #include "services/SerialService.h"
 #include "ui/UIStateMachine.h"
 
@@ -234,9 +232,8 @@ private:
      *
      * INITIALIZATION ORDER:
      * 1. ConfigService (load from SD)
-     * 2. TokenService (load database or sync from orchestrator)
-     * 3. OrchestratorService (WiFi + orchestrator connection)
-     * 4. SerialService (command processing infrastructure)
+     * 2. TokenService (load database from SD)
+     * 3. SerialService (command processing infrastructure)
      *
      * SOURCE: v4.1 lines 2703-2850, 2863-2886
      *
@@ -260,18 +257,6 @@ private:
      * SOURCE: v4.1 lines 2938-3392
      */
     void registerSerialCommands();
-
-    /**
-     * @brief Start FreeRTOS background task on Core 0
-     *
-     * Starts the background synchronization task that:
-     * - Checks orchestrator health every 10 seconds
-     * - Uploads queued scans when connection available
-     * - Updates connection state
-     *
-     * SOURCE: v4.1 lines 2679-2683, 2893-2900
-     */
-    void startBackgroundTasks();
 
     /**
      * @brief Print ESP32 reset reason for diagnostics
@@ -320,6 +305,22 @@ private:
     void processRFIDScan();
 
     /**
+     * @brief Decide what a known ghost can present, and show it
+     * @param token Token already confirmed present in the database
+     *
+     * Shared by processRFIDScan() and the SIMULATE_SCAN serial command so
+     * the two cannot drift.
+     */
+    void presentGhost(const models::TokenMetadata& token);
+
+    /**
+     * @brief Draw a full-screen setup-error notice (not in-world)
+     * @param display Display driver
+     * @param message Short message, kept under ~13 chars to fit at size 3
+     */
+    static void showFatalError(hal::DisplayDriver& display, const char* message);
+
+    /**
      * @brief Process touch events via UI state machine
      *
      * Delegates to UIStateMachine::handleTouch() which:
@@ -331,44 +332,6 @@ private:
      * SOURCE: v4.1 lines 3577-3664 (extracted to UIStateMachine)
      */
     void processTouch();
-
-    /**
-     * @brief Generate ISO 8601 timestamp for scan records
-     *
-     * Format: YYYY-MM-DDTHH:MM:SSZ
-     * Uses ESP32 time() function (requires NTP or manual time set)
-     *
-     * SOURCE: v4.1 lines 1649-1669
-     *
-     * @return ISO 8601 formatted timestamp string
-     */
-    String generateTimestamp();
-
-    /**
-     * @brief Apply the shared outcome logic for a classified scan response.
-     *
-     * Both processRFIDScan() and the SIMULATE_SCAN serial command send a scan
-     * to the orchestrator and receive a ScanOutcome.  The queueing decision
-     * and UI transition for the REJECTED_NO_SESSION case are identical in
-     * both paths — this helper owns that shared logic so the two call sites
-     * cannot drift.
-     *
-     * @param outcome      Classified result from classifyScanResponse().
-     * @param scan         Scan data (needed for queueScan on RETRY_QUEUE).
-     * @param orchestrator Reference to the orchestrator singleton.
-     * @param[out] videoUnavailable
-     *             Set to true when the scan was queued or video was
-     *             rejected — caller should show the "VIDEO UNAVAILABLE" hint.
-     *             Unchanged (left false) on ACCEPTED.
-     * @return true  if scan processing should continue to the display step
-     *               (ACCEPTED or ACCEPTED_NO_VIDEO or RETRY_QUEUE).
-     * @return false if processing is complete and the caller should return
-     *               immediately (REJECTED_NO_SESSION — scan not recorded).
-     */
-    bool applyScanOutcome(services::ScanOutcome outcome,
-                          const models::ScanData& scan,
-                          services::OrchestratorService& orchestrator,
-                          bool& videoUnavailable);
 
     // PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
     // PPP LIFECYCLE MANAGEMENT PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
@@ -547,210 +510,49 @@ inline void Application::processRFIDScan() {
         return;
     }
 
-    // ═══ ORCHESTRATOR SEND/QUEUE ════════════════════════════════════
-    // SCAN-PATH CONTRACT (F-PARITY-06): at most ONE bounded send attempt
-    // here; on failure the scan is queued immediately. Retries/backoff
-    // belong exclusively to the Core-0 background task. Token display
-    // never waits beyond that single attempt.
-    auto& config = services::ConfigService::getInstance();
-    auto& orchestrator = services::OrchestratorService::getInstance();
-
-    models::ScanData scan(
-        tokenId,
-        config.getConfig().teamID,
-        config.getConfig().deviceID,
-        generateTimestamp()
-    );
-
-    // Video tokens scanned offline/queued must show the "video unavailable"
-    // treatment, not the normal video-pending treatment — a queued scan
-    // will never trigger playback later (decision A4).
-    bool videoUnavailable = false;
-
-    if (orchestrator.getState() == models::ORCH_CONNECTED) {
-        LOG_INFO("[SCAN] Attempting to send to orchestrator (single attempt)...\n");
-        services::ScanOutcome outcome = orchestrator.sendScan(scan, config.getConfig());
-        LOG_INFO("[SCAN] Outcome: %d\n", static_cast<int>(outcome));
-        // applyScanOutcome() owns queueing and the REJECTED_NO_SESSION UI
-        // transition — single definition shared with SIMULATE_SCAN.
-        if (!applyScanOutcome(outcome, scan, orchestrator, videoUnavailable)) {
-            return;  // REJECTED_NO_SESSION: scan not recorded, stop processing
-        }
-    } else {
-        LOG_INFO("[SCAN] Offline, queueing immediately\n");
-        orchestrator.queueScan(scan);
-        videoUnavailable = true;  // queued scans never trigger video (A4)
-    }
-
-    // ═══ TOKEN DISPLAY ══════════════════════════════════════════════
-    if (token->isVideoToken()) {
-        LOG_INFO("[SCAN] Video token detected%s\n",
-                 videoUnavailable ? " (video unavailable hint)" : "");
-        if (videoUnavailable) {
-            _ui->showProcessing(*token, "VIDEO UNAVAILABLE", "Rescan later");
-        } else {
-            _ui->showProcessing(*token);
-        }
-    } else {
-        LOG_INFO("[SCAN] Regular token detected\n");
-        _ui->showToken(*token);
-    }
+    // Presentation is shared with SIMULATE_SCAN so the two paths cannot
+    // drift — the same reason applyScanOutcome() existed on main.
+    presentGhost(*token);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// TIMESTAMP GENERATION - ISO 8601 Format
-// ═══════════════════════════════════════════════════════════════════════
+// ───────────────────────────────────────────────────────────────────────────
+// Ghost Presentation - shared by the RFID path and SIMULATE_SCAN
+// ───────────────────────────────────────────────────────────────────────────
 
 /**
- * generateTimestamp() - Create ISO 8601 timestamp in local time with offset
+ * presentGhost() - decide what a known ghost can present, and show it.
  *
- * Uses the system real-time clock (set via SNTP after WiFi connects) and
- * the active POSIX TZ (applied from the orchestrator's /health response).
- * Rendered in local time with an explicit offset suffix so the timestamp
- * is timezone-unambiguous and matches the backend host's wall clock.
+ * Works out what is actually on the card BEFORE entering the display
+ * screen: an image if one exists, audio if one exists. Checking up front
+ * matters because DisplayDriver::drawBMP() paints its own
+ * "Missing: <path>" error to the TFT when a file is absent, which a guest
+ * must never see.
  *
- * Format (NTP synced): "YYYY-MM-DDTHH:MM:SS.mmm±HH:MM"
- *   e.g., "2026-04-16T23:16:23.853-07:00"
- *
- * Format (pre-NTP-sync): "1970-01-01THH:MM:SS.mmmZ"
- *   Uptime-based placeholder — backend can identify un-synced scans by
- *   the 1970 prefix.
+ * A known ghost with neither image nor audio is a card SETUP ERROR, not an
+ * unrecognised tag. The guest sees the same in-world copy either way; the
+ * serial lines below are what tell whoever built the card which it was.
  */
-inline String Application::generateTimestamp() {
-    time_t now = time(nullptr);
-    // Epoch threshold: any value above this is plausibly a real timestamp
-    // (2023-11-14 — well before any conceivable deployment date). Anything
-    // below means SNTP hasn't populated the system clock yet.
-    constexpr time_t NTP_SYNCED_THRESHOLD = 1700000000;
+inline void Application::presentGhost(const models::TokenMetadata& token) {
+    auto& sd = hal::SDCard::getInstance();
+    const bool hasImage = sd.exists(token.getImagePath());
+    const bool hasAudio = sd.exists(token.getAudioPath());
 
-    if (now >= NTP_SYNCED_THRESHOLD) {
-        struct tm tm_local, tm_utc;
-        localtime_r(&now, &tm_local);
-        gmtime_r(&now, &tm_utc);
-
-        // Use ms-within-current-second to preserve sub-second ordering of
-        // back-to-back scans without pulling in gettimeofday().
-        unsigned long ms = millis() % 1000;
-
-        // Compute offset from UTC by differencing local and UTC components
-        // of the same instant. tm_gmtoff would be cleaner but isn't part
-        // of the C standard and is unavailable in ESP32's newlib.
-        long local_s = tm_local.tm_hour * 3600L + tm_local.tm_min * 60 + tm_local.tm_sec;
-        long utc_s   = tm_utc.tm_hour   * 3600L + tm_utc.tm_min   * 60 + tm_utc.tm_sec;
-        long off = local_s - utc_s;
-        // Handle day-boundary crossings (e.g., local Apr 16 23:00 vs UTC Apr 17 06:00)
-        long local_yd = (long)tm_local.tm_year * 366 + tm_local.tm_yday;
-        long utc_yd   = (long)tm_utc.tm_year   * 366 + tm_utc.tm_yday;
-        if (local_yd > utc_yd)      off += 86400;
-        else if (local_yd < utc_yd) off -= 86400;
-
-        char sign = (off < 0) ? '-' : '+';
-        long off_abs = (off < 0) ? -off : off;
-        int off_hr = off_abs / 3600;
-        int off_min = (off_abs % 3600) / 60;
-
-        char timestamp[36];
-        snprintf(timestamp, sizeof(timestamp),
-            "%04d-%02d-%02dT%02d:%02d:%02d.%03lu%c%02d:%02d",
-            tm_local.tm_year + 1900, tm_local.tm_mon + 1, tm_local.tm_mday,
-            tm_local.tm_hour, tm_local.tm_min, tm_local.tm_sec, ms,
-            sign, off_hr, off_min);
-        return String(timestamp);
+    if (!hasImage && !hasAudio) {
+        LOG_ERROR("SCAN-FAIL", "Known token has neither image nor audio on SD");
+        Serial.printf("        Expected image: %s\n", token.getImagePath().c_str());
+        Serial.printf("        Expected audio: %s\n", token.getAudioPath().c_str());
+        if (_ui) {
+            _ui->showScanFailed("NO ASSETS");
+        }
+        return;
     }
 
-    // Pre-sync fallback: uptime-based placeholder under 1970 epoch.
-    unsigned long ms = millis();
-    unsigned long seconds = ms / 1000;
-    unsigned long minutes = seconds / 60;
-    unsigned long hours = minutes / 60;
-
-    char timestamp[30];
-    snprintf(timestamp, sizeof(timestamp),
-        "1970-01-01T%02lu:%02lu:%02lu.%03luZ",
-        hours % 24, minutes % 60, seconds % 60, ms % 1000);
-    return String(timestamp);
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// SHARED SCAN OUTCOME HANDLER - Single source of truth for queueing/UI
-// ═══════════════════════════════════════════════════════════════════════
-
-/**
- * applyScanOutcome() - Shared outcome handler for scan response classification.
- *
- * Owns the queueing decision and the REJECTED_NO_SESSION UI transition so
- * that processRFIDScan() and the SIMULATE_SCAN serial command cannot drift.
- * The caller is responsible for its own logging and for the final token
- * display step.
- *
- * Returns true  → continue to display (ACCEPTED / ACCEPTED_NO_VIDEO / RETRY_QUEUE)
- * Returns false → caller must return immediately (REJECTED_NO_SESSION)
- */
-inline bool Application::applyScanOutcome(services::ScanOutcome outcome,
-                                           const models::ScanData& scan,
-                                           services::OrchestratorService& orchestrator,
-                                           bool& videoUnavailable) {
-    switch (outcome) {
-        case services::ScanOutcome::ACCEPTED:
-            // Scan recorded, video trigger sent — normal happy path.
-            // videoUnavailable stays false.
-            return true;
-
-        case services::ScanOutcome::REJECTED_NO_SESSION:
-            // 409 SESSION_NOT_FOUND: scan was NOT persisted. Final per A5 —
-            // do NOT queue (retrying without a session would hit the same 409).
-            // Show the failure screen so the player knows to wait for a session.
-            LOG_INFO("[SCAN-OUTCOME] REJECTED_NO_SESSION — scan not recorded, not queued\n");
-            if (_ui) {
-                _ui->showScanFailed("NO SESSION");
-            }
-            return false;  // Tell the caller to stop processing
-
-        case services::ScanOutcome::ACCEPTED_NO_VIDEO:
-            // 409 video-rejected: scan WAS recorded; only the realtime video
-            // trigger failed (video busy / VLC down). Final per A5 — never
-            // requeue (a replayed scan must never start video later). UI hint
-            // (A4): "VIDEO UNAVAILABLE / Rescan later".
-            LOG_INFO("[SCAN-OUTCOME] ACCEPTED_NO_VIDEO — scan recorded, video skipped\n");
-            videoUnavailable = true;
-            return true;
-
-        case services::ScanOutcome::RETRY_QUEUE:
-            // Network failure / 5xx / unrecognised response. Queue for batch
-            // replay by the Core-0 background task. Video tokens in the queue
-            // never trigger playback on replay (A4).
-            LOG_INFO("[SCAN-OUTCOME] RETRY_QUEUE — queuing scan\n");
-            orchestrator.queueScan(scan);
-            videoUnavailable = true;
-            return true;
+    LOG_INFO("[SCAN] Presenting ghost %s (image=%s, audio=%s)\n",
+             token.tokenId.c_str(), hasImage ? "yes" : "no", hasAudio ? "yes" : "no");
+    if (_ui) {
+        _ui->showToken(token, hasImage, hasAudio);
     }
-
-    // Unreachable — all enum cases are handled above.
-    return true;
 }
-
-// PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
-// PPP END OF IMPLEMENTATION SECTION PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
-// PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
-//
-// NOTE: Other method implementations (setup, initializeHardware, etc.)
-// will be added by other agents in Phase 5.
-//
-// Completed implementations:
-// ✅ loop() - Main event loop coordination
-// ✅ processTouch() - Touch event delegation
-// ✅ processRFIDScan() - RFID scan processing flow
-// ✅ generateTimestamp() - ISO 8601 timestamp generation
-//
-// Pending implementations:
-// ⏳ setup() - Boot sequence orchestration
-// ⏳ initializeHardware() - HAL component initialization
-// ⏳ initializeServices() - Service layer initialization
-// ⏳ registerSerialCommands() - Command handler registration
-// ⏳ startBackgroundTasks() - FreeRTOS task creation
-// ⏳ handleBootOverride() - Boot-time DEBUG_MODE override
-//
-// PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PPP IMPLEMENTATION SECTION - APPLICATION SETUP LOGIC PPPPPPPPPPPPPPPPPPPPPPP
@@ -763,6 +565,15 @@ inline bool Application::applyScanOutcome(services::ScanOutcome outcome,
 // ───────────────────────────────────────────────────────────────────────────
 
 inline void Application::handleBootOverride() {
+    // Paint the home screen FIRST, so the prop looks alive immediately and a
+    // guest never sees a blank or branded boot screen. Safe here: the
+    // display is fully initialized by initializeEarlyHardware(), which runs
+    // before this. RFID is not up yet, hence rfidReady=false.
+    {
+        ui::GhostReadyScreen bootScreen(false);
+        bootScreen.render(hal::DisplayDriver::getInstance());
+    }
+
     // If DEBUG_MODE is already true from config, skip the override countdown
     if (_debugMode) {
         Serial.println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -858,19 +669,19 @@ inline bool Application::initializeEarlyHardware() {
     // CRITICAL: Must come after Display to get final VSPI configuration
     auto& sd = hal::SDCard::getInstance();
     if (!sd.begin()) {
-        LOG_ERROR("INIT", "SD card not available - config cannot be loaded!");
-        return false;
+        // NOT fatal. On main this returned false, setup() bailed, and the
+        // screen stayed blank — so the "No SD Card" message in
+        // initializeServices() was unreachable, and the one failure an
+        // operator most needs to see was the one that showed nothing.
+        // The display works; carry on far enough to say so.
+        LOG_ERROR("INIT", "SD card not available - continuing to report it on screen");
     }
     LOG_INFO("[INIT] ✓ SD card initialized\n");
 
-    // Show early boot message on display
+    // No boot splash. handleBootOverride() paints the home screen a moment
+    // from now; anything drawn here would only be overwritten, and on main
+    // this spot showed ALN branding for the whole override window.
     display.fillScreen(0x0000);  // Black
-    display.getTFT().setTextColor(0xFFE0);  // Yellow
-    display.getTFT().setTextSize(2);
-    display.getTFT().setCursor(0, 0);
-    display.getTFT().println("NeurAI");
-    display.getTFT().println("Memory Scanner");
-    display.getTFT().println("v5.0 Booting...");
 
     LOG_INFO("[INIT] Early hardware initialization complete\n");
     return true;
@@ -892,31 +703,26 @@ inline bool Application::initializeLateHardware() {
     }
     LOG_INFO("[INIT] ✓ Touch initialized\n");
 
-    // Initialize Audio Driver (lazy-init to prevent boot beeping)
+    // Audio: real init is deferred until first playback (prevents boot
+    // beeping), but the configured gain is handed over now so it is applied
+    // the moment the output is created.
     auto& audio = hal::AudioDriver::getInstance();
-    // Audio initialization is deferred until first use
+    audio.setVolume(services::ConfigService::getInstance().getConfig().volume);
     LOG_INFO("[INIT] ✓ Audio driver ready (deferred init)\n");
 
     // RFID Initialization (conditional on DEBUG_MODE - now correctly set from config!)
     if (!_debugMode) {
         LOG_INFO("[INIT] Initializing RFID (production mode)...\n");
-        display.getTFT().println("RFID: Initializing...");
 
         auto& rfid = hal::RFIDReader::getInstance();
         if (rfid.begin()) {
             _rfidInitialized = true;
             LOG_INFO("[INIT] ✓ RFID initialized\n");
-            display.getTFT().setTextColor(0x07E0);  // Green
-            display.getTFT().println("RFID: Ready");
         } else {
             LOG_ERROR("INIT", "RFID initialization failed");
-            display.getTFT().setTextColor(0xF800);  // Red
-            display.getTFT().println("RFID: FAILED");
         }
     } else {
         LOG_INFO("[INIT] RFID deferred (DEBUG_MODE - use START_SCANNER)\n");
-        display.getTFT().setTextColor(0xFD20);  // Orange
-        display.getTFT().println("RFID: Debug Mode");
     }
 
     LOG_INFO("[INIT] Late hardware initialization complete\n");
@@ -927,127 +733,59 @@ inline bool Application::initializeLateHardware() {
 // Service Initialization - Config, Tokens, Orchestrator
 // ───────────────────────────────────────────────────────────────────────────
 
+/**
+ * showFatalError() - full-screen, legible failure notice
+ *
+ * For conditions where the prop cannot function at all. Unlike the in-world
+ * SCAN_FAILED screen this is aimed at whoever is setting the prop up, so it
+ * says plainly what is wrong rather than staying in character.
+ */
+inline void Application::showFatalError(hal::DisplayDriver& display, const char* message) {
+    auto& tft = display.getTFT();
+    const int16_t screenW = 240;
+
+    tft.fillScreen(TFT_BLACK);
+
+    tft.setTextSize(3);
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    int16_t w = (int16_t)(6 * 3 * strlen(message));
+    tft.setCursor((screenW - w) / 2, 130);
+    tft.print(message);
+
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+    const char* hint = "Insert a prepared card and restart";
+    w = (int16_t)(6 * strlen(hint));
+    tft.setCursor((screenW - w) / 2, 180);
+    tft.print(hint);
+}
+
 inline bool Application::initializeServices() {
     LOG_INFO("[INIT] Initializing services...\n");
 
     auto& sd = hal::SDCard::getInstance();
     auto& display = hal::DisplayDriver::getInstance();
-    auto& config = services::ConfigService::getInstance();
 
     if (!sd.isPresent()) {
+        // A prop with no card cannot present anything. This is the one
+        // boot error a guest might legitimately see, and it is correct
+        // that they do: the device is broken until the card is fixed.
         LOG_ERROR("INIT", "Services require SD card - degraded mode");
-        display.getTFT().setTextColor(0xF800);  // Red
-        display.getTFT().println("No SD Card!");
+        showFatalError(display, "NO SD CARD");
         return false;
     }
 
-    // Config already loaded in setup(), just use it
-
-    // Initialize orchestrator service (WiFi + connection)
-    auto& orchestrator = services::OrchestratorService::getInstance();
-
-    // Initialize queue BEFORE WiFi (validates file, counts entries)
-    LOG_INFO("[INIT] Initializing offline queue...\n");
-    if (!orchestrator.initializeQueue()) {
-        LOG_INFO("[INIT] ⚠ Queue was corrupted and deleted\n");
-        display.getTFT().setTextColor(0xFD20);  // Orange
-        display.getTFT().println("Queue: Reset");
-    } else {
-        int queueSize = orchestrator.getQueueSize();
-        LOG_INFO("[INIT] ✓ Queue ready: %d entries\n", queueSize);
-        if (queueSize > 0) {
-            display.getTFT().setTextColor(0xFD20);  // Orange
-            display.getTFT().printf("Queue: %d pending\n", queueSize);
-        }
-    }
-
-    orchestrator.initializeWiFi(config.getConfig());
-
-    // Display WiFi status
-    if (orchestrator.getState() == models::ORCH_CONNECTED) {
-        display.getTFT().setTextColor(0x07E0);  // Green
-        display.getTFT().println("Connected!");
-    } else {
-        display.getTFT().setTextColor(0xFD20);  // Orange
-        display.getTFT().println("WiFi: Offline");
-    }
-
-    // Initialize token service
+    // Token database. Config is already loaded by setup(). There is no
+    // orchestrator on this build, so the card is the sole source of
+    // truth — no sync, no queue, no network.
     auto& tokens = services::TokenService::getInstance();
-
-    if (config.getConfig().syncTokens && orchestrator.getState() == models::ORCH_CONNECTED) {
-        LOG_INFO("[INIT] Syncing tokens from orchestrator...\n");
-        display.getTFT().println("Syncing tokens...");
-
-        if (tokens.syncFromOrchestrator(config.getConfig().orchestratorURL, orchestrator)) {
-            LOG_INFO("[INIT] ✓ Token sync successful\n");
-            display.getTFT().setTextColor(0x07E0);  // Green
-            display.getTFT().println("Tokens: Synced");
-        } else {
-            LOG_ERROR("INIT", "Token sync failed - using cached data");
-            display.getTFT().setTextColor(0xFD20);  // Orange
-            display.getTFT().println("Tokens: Cached");
-        }
-    } else {
-        LOG_INFO("[INIT] Skipping token sync (disabled or offline)\n");
-        display.getTFT().setTextColor(0xFD20);  // Orange
-        display.getTFT().println("Tokens: Cached");
-    }
-
     tokens.loadDatabaseFromSD();
-    LOG_INFO("[INIT] ✓ Token service initialized (%d tokens)\n", tokens.getCount());
+    LOG_INFO("[INIT] ✓ Token service initialized (%d ghosts)\n", tokens.getCount());
 
-    display.getTFT().setTextColor(0x07E0);  // Green
-    display.getTFT().printf("Loaded: %d tokens\n", tokens.getCount());
-
-    // Asset sync (BMPs + audio) — runs after token sync so the remote
-    // manifest is authoritative and we only ever hit the network once per
-    // boot. Progress is rendered to the TFT so the operator can see the
-    // (possibly multi-minute) first-time sync make progress.
-    if (config.getConfig().syncAssets && orchestrator.getState() == models::ORCH_CONNECTED) {
-        LOG_INFO("[INIT] Syncing assets from orchestrator...\n");
-        auto& tft = display.getTFT();
-        tft.setTextColor(0xFFFF);
-        tft.println("Syncing assets...");
-        int16_t progressRow = tft.getCursorY();
-
-        // Guard redraws by (fileIndex, integer-percent): the streaming
-        // download fires progress per 4 KB chunk, which would otherwise
-        // produce thousands of redundant TFT writes per sync.
-        int lastFileIdx = -1;
-        int lastPct = -1;
-        auto& assets = services::AssetService::getInstance();
-        assets.setProgressCallback(
-            [&tft, progressRow, &lastFileIdx, &lastPct](const services::AssetService::ProgressInfo& p) {
-                int pct = p.bytesTotal > 0
-                    ? (int)((p.bytesDone * 100) / p.bytesTotal) : 0;
-                if (p.fileIndex == lastFileIdx && pct == lastPct) return;
-                lastFileIdx = p.fileIndex;
-                lastPct = pct;
-                tft.fillRect(0, progressRow, 240, 16, 0x0000);
-                tft.setCursor(0, progressRow);
-                tft.setTextColor(0xFFFF);
-                tft.printf("%s %d/%d %d%%\n",
-                           p.type.c_str(), p.fileIndex, p.fileCount, pct);
-            });
-
-        if (assets.syncFromOrchestrator(config.getConfig().orchestratorURL, orchestrator)) {
-            tft.setTextColor(0x07E0);  // Green
-            tft.println("Assets: Synced");
-        } else {
-            tft.setTextColor(0xFD20);  // Orange
-            tft.println("Assets: Partial");
-        }
-        assets.setProgressCallback(nullptr);
-    } else {
-        LOG_INFO("[INIT] Skipping asset sync (disabled or offline)\n");
-        display.getTFT().setTextColor(0xFD20);
-        display.getTFT().println("Assets: Cached");
-    }
-
-    // Serial service ready (command registration done separately)
+    // Deliberately no TFT output here. The home screen is painted before
+    // the boot-override window, and boot status text would scribble over
+    // it in front of a guest.
     LOG_INFO("[INIT] ✓ Serial service ready\n");
-
     LOG_INFO("[INIT] Service initialization complete\n");
     return true;
 }
@@ -1057,79 +795,38 @@ inline bool Application::initializeServices() {
 // ───────────────────────────────────────────────────────────────────────────
 
 inline void Application::registerSerialCommands() {
-    // Get singleton service references
     auto& serial = services::SerialService::getInstance();
     auto& config = services::ConfigService::getInstance();
     auto& tokens = services::TokenService::getInstance();
-    auto& orch = services::OrchestratorService::getInstance();
     auto& rfid = hal::RFIDReader::getInstance();
 
-    // Register built-in commands (HELP, REBOOT, MEM)
+    // Built-ins: HELP, REBOOT, MEM
     serial.registerBuiltinCommands();
 
-    // CONFIG - Show current configuration
     serial.registerCommand("CONFIG", [&config](const String& args) {
-        config.getConfig().print();  // Config model has print() method
+        config.getConfig().print();
     }, "Show current device configuration");
 
-    // STATUS / DIAG_NETWORK - Show orchestrator connection status
-    serial.registerCommand("STATUS", [&orch, &tokens](const String& args) {
-        models::ConnectionState state = orch.getState();
-        Serial.println("\n=== Orchestrator Status ===");
-        Serial.print("Connection: ");
+    serial.registerCommand("STATUS", [this, &tokens, &config](const String& args) {
+        Serial.println("\n=== Ghost Scanner Status ===");
+        Serial.printf("Device ID:  %s\n", config.getConfig().deviceID.c_str());
+        Serial.printf("Ghosts:     %d in database\n", tokens.getCount());
+        Serial.printf("RFID:       %s\n", _rfidInitialized ? "ready" : "not initialized");
+        Serial.printf("Debug mode: %s\n", _debugMode ? "yes" : "no");
+        Serial.printf("SD card:    %s\n",
+                      hal::SDCard::getInstance().isPresent() ? "present" : "ABSENT");
+        Serial.printf("Free heap:  %d bytes\n", ESP.getFreeHeap());
+        Serial.println("============================\n");
+    }, "Show device status");
 
-        switch (state) {
-            case models::ConnectionState::ORCH_DISCONNECTED:
-                Serial.println("DISCONNECTED");
-                break;
-            case models::ConnectionState::ORCH_WIFI_CONNECTED:
-                Serial.printf("WIFI_CONNECTED (%s)\n", WiFi.localIP().toString().c_str());
-                break;
-            case models::ConnectionState::ORCH_CONNECTED:
-                Serial.printf("CONNECTED (%s + orchestrator)\n", WiFi.localIP().toString().c_str());
-                break;
-        }
-
-        Serial.printf("Queue size: %d entries\n", orch.getQueueSize());
-        Serial.printf("Token database: %d tokens loaded\n", tokens.getCount());
-        Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
-        Serial.println("===========================\n");
-    }, "Show orchestrator connection and queue status");
-
-    serial.registerCommand("DIAG_NETWORK", [&orch, &tokens](const String& args) {
-        // Alias for STATUS
-        models::ConnectionState state = orch.getState();
-        Serial.println("\n=== Network Diagnostics ===");
-        Serial.print("Connection: ");
-
-        switch (state) {
-            case models::ConnectionState::ORCH_DISCONNECTED:
-                Serial.println("DISCONNECTED");
-                break;
-            case models::ConnectionState::ORCH_WIFI_CONNECTED:
-                Serial.printf("WIFI_CONNECTED (%s)\n", WiFi.localIP().toString().c_str());
-                break;
-            case models::ConnectionState::ORCH_CONNECTED:
-                Serial.printf("CONNECTED (%s + orchestrator)\n", WiFi.localIP().toString().c_str());
-                break;
-        }
-
-        Serial.printf("Queue size: %d entries\n", orch.getQueueSize());
-        Serial.printf("Token database: %d tokens\n", tokens.getCount());
-        Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
-        Serial.println("===========================\n");
-    }, "Alias for STATUS command");
-
-    // TOKENS - Show token database
     serial.registerCommand("TOKENS", [&tokens](const String& args) {
         tokens.printDatabase();
-    }, "Show first 10 tokens from database");
+    }, "Show first 10 ghosts from database");
 
-    // SET_CONFIG - Update configuration value
     serial.registerCommand("SET_CONFIG", [&config](const String& args) {
         if (args.length() == 0) {
             Serial.println("Usage: SET_CONFIG:KEY=VALUE");
-            Serial.println("Example: SET_CONFIG:TEAM_ID=999");
+            Serial.println("Example: SET_CONFIG:VOLUME=1.5");
             return;
         }
 
@@ -1155,7 +852,6 @@ inline void Application::registerSerialCommands() {
         }
     }, "Update config value (use SAVE_CONFIG to persist)");
 
-    // SAVE_CONFIG - Persist configuration to SD card
     serial.registerCommand("SAVE_CONFIG", [&config](const String& args) {
         if (config.saveToSD()) {
             Serial.println("✓ Configuration saved to SD card");
@@ -1165,7 +861,6 @@ inline void Application::registerSerialCommands() {
         }
     }, "Save current config to /config.txt");
 
-    // START_SCANNER - Initialize RFID in DEBUG_MODE
     serial.registerCommand("START_SCANNER", [this, &rfid](const String& args) {
         if (!_debugMode) {
             Serial.println("Error: START_SCANNER only works in DEBUG_MODE");
@@ -1182,7 +877,7 @@ inline void Application::registerSerialCommands() {
         Serial.flush();
         delay(100);
 
-        if (rfid.begin()) {  // RFIDReader uses begin() not initialize()
+        if (rfid.begin()) {
             _rfidInitialized = true;
             Serial.println("✓ RFID initialized successfully");
             Serial.println("⚡ Serial RX now disabled (GPIO 3 conflict)");
@@ -1191,328 +886,48 @@ inline void Application::registerSerialCommands() {
         }
     }, "Initialize RFID (DEBUG_MODE only, kills serial RX)");
 
-    // SIMULATE_SCAN - Simulate token processing without hardware
-    serial.registerCommand("SIMULATE_SCAN", [this, &tokens, &orch, &config](const String& args) {
+    // SIMULATE_SCAN - exercise the full presentation path without a tag.
+    // Unlike main, this DOES drive the real display: with no orchestrator
+    // there is no network step to stub out, so what you see here is what a
+    // real tap produces.
+    serial.registerCommand("SIMULATE_SCAN", [this, &tokens](const String& args) {
         if (args.length() == 0) {
-            Serial.println("\n✗ ERROR: No tokenId provided");
             Serial.println("Usage: SIMULATE_SCAN:tokenId");
-            Serial.println("Example: SIMULATE_SCAN:kaa001");
+            Serial.println("Example: SIMULATE_SCAN:ghost01");
             return;
         }
 
         String tokenId = args;
         tokenId.trim();
 
-        Serial.println("\n═══════════════════════════════════════════════");
-        Serial.println("     SIMULATE TOKEN SCAN (NO RFID HARDWARE)");
-        Serial.println("═══════════════════════════════════════════════");
-        Serial.printf("Token ID: %s\n", tokenId.c_str());
-
-        // Mirror real processRFIDScan(): look up the token in the local DB
-        // FIRST. Unknown tokens do NOT get sent to the orchestrator — they
-        // would surface as the UNKNOWN TOKEN screen on a real scan.
-        const auto* token = tokens.get(tokenId);
+        const models::TokenMetadata* token = tokens.get(tokenId);
         if (!token) {
-            Serial.println("✗ Token not in database");
-            Serial.println("  Real scan would: show UNKNOWN TOKEN screen, NOT send to orchestrator");
+            Serial.printf("Unknown ghost '%s' - not in database\n", tokenId.c_str());
+            Serial.println("A real tap would show the failure screen.");
             if (_ui) {
                 _ui->showScanFailed("UNKNOWN TOKEN");
             }
-            Serial.println("═══════════════════════════════════════════════\n");
             return;
         }
 
-        Serial.printf("Token found: %s\n", token->isVideoToken() ? "VIDEO" : "REGULAR");
-        Serial.printf("  Image: %s\n", token->getImagePath().c_str());
-        if (!token->isVideoToken()) {
-            Serial.printf("  Audio: %s\n", token->getAudioPath().c_str());
-        }
+        Serial.printf("Simulating scan of '%s'\n", tokenId.c_str());
+        presentGhost(*token);
+    }, "Present a ghost by id, exactly as a real tap would");
 
-        // Create scan data (use same timestamp format as real scans)
-        models::ScanData scan;
-        scan.tokenId = tokenId;
-        scan.teamId = config.getConfig().teamID;
-        scan.deviceId = config.getConfig().deviceID;
-        scan.timestamp = generateTimestamp();
-
-        // Send or queue — use the shared outcome handler (same logic as
-        // processRFIDScan, single definition to prevent drift).
-        if (orch.getState() == models::ConnectionState::ORCH_CONNECTED) {
-            Serial.println("Sending to orchestrator (single attempt)...");
-            services::ScanOutcome outcome = orch.sendScan(scan, config.getConfig());
-            bool videoUnavailable = false;
-            bool continueProcessing = applyScanOutcome(outcome, scan, orch, videoUnavailable);
-
-            // Translate outcome to serial diagnostic output
-            if (!continueProcessing) {
-                Serial.println("✗ 409 SESSION_NOT_FOUND: scan NOT recorded");
-                Serial.println("  Final per A5 — NOT queued. Real scan shows NO SESSION screen.");
-            } else if (videoUnavailable) {
-                if (outcome == services::ScanOutcome::ACCEPTED_NO_VIDEO) {
-                    Serial.println("✓ Scan recorded; video unavailable (409 rejected)");
-                    Serial.println("  Real scan shows VIDEO UNAVAILABLE overlay (A4)");
-                } else {
-                    Serial.println("Send failed, scan queued for batch replay");
-                }
-            } else {
-                Serial.println("✓ Sent successfully (scan recorded)");
-            }
-        } else {
-            Serial.println("Offline, queuing...");
-            orch.queueScan(scan);
-        }
-
-        Serial.println("✓ Simulation complete");
-        Serial.println("═══════════════════════════════════════════════\n");
-    }, "Simulate token scan for testing (no hardware)");
-
-    // SIMULATE_FAIL - Trigger the SCAN_FAILED screen for UI verification
-    // Useful for verifying the non-blocking failure screen behavior without
-    // needing to produce a real scan failure via hardware.
     serial.registerCommand("SIMULATE_FAIL", [this](const String& args) {
         String reason = args;
         reason.trim();
         if (reason.length() == 0) {
             reason = "READ FAILED";
         }
-        Serial.println("\n═══════════════════════════════════════════════");
-        Serial.println("     SIMULATE SCAN FAILURE (UI ONLY)");
-        Serial.println("═══════════════════════════════════════════════");
-        Serial.printf("Reason: %s\n", reason.c_str());
+
+        Serial.printf("Showing failure screen (reason logged as '%s')\n", reason.c_str());
         if (_ui) {
             _ui->showScanFailed(reason);
-            Serial.println("✓ SCAN_FAILED screen shown (non-blocking)");
-            Serial.printf("  Auto-dismiss in %lu ms, or tap to dismiss\n",
-                          (unsigned long)timing::SCAN_FAILED_TIMEOUT_MS);
-        } else {
-            Serial.println("✗ UI not initialized");
         }
-        Serial.println("═══════════════════════════════════════════════\n");
-    }, "Show SCAN_FAILED screen (SIMULATE_FAIL:<reason>)");
+    }, "Show the failure screen (UI verification)");
 
-    // QUEUE_TEST - Add mock scans to queue
-    serial.registerCommand("QUEUE_TEST", [&orch, &config](const String& args) {
-        Serial.println("\n=== Queue Test ===");
-        Serial.println("Adding 20 mock scans to queue...");
-        Serial.printf("Queue size before: %d\n", orch.getQueueSize());
-
-        for (int i = 1; i <= 20; i++) {
-            models::ScanData mockScan;
-            mockScan.tokenId = String("TEST") + String(i, 16);
-            mockScan.teamId = config.getConfig().teamID;
-            mockScan.deviceId = config.getConfig().deviceID;
-            mockScan.timestamp = String(millis());
-
-            orch.queueScan(mockScan);  // queueScan takes only ScanData
-        }
-
-        Serial.printf("Queue size after: %d\n", orch.getQueueSize());
-        Serial.println("✓ 20 mock scans added");
-        Serial.println("==================\n");
-    }, "Add 20 mock scans to queue for testing");
-
-    // FORCE_UPLOAD - Manually trigger queue batch upload
-    serial.registerCommand("FORCE_UPLOAD", [&orch, &config](const String& args) {
-        Serial.println("\n=== Manual Queue Upload ===");
-        Serial.printf("Queue size: %d\n", orch.getQueueSize());
-
-        if (orch.getQueueSize() == 0) {
-            Serial.println("Queue is empty, nothing to upload");
-            Serial.println("===========================\n");
-            return;
-        }
-
-        Serial.println("Attempting batch upload...");
-
-        if (orch.uploadQueueBatch(config.getConfig())) {
-            Serial.printf("✓ Upload successful, queue size now: %d\n", orch.getQueueSize());
-        } else {
-            Serial.println("✗ Upload failed (check connection)");
-        }
-
-        Serial.println("===========================\n");
-    }, "Force immediate queue batch upload");
-
-    // SHOW_QUEUE - Display queue contents
-    serial.registerCommand("SHOW_QUEUE", [&orch](const String& args) {
-        orch.printQueue();
-    }, "Show first 10 queued scans");
-
-    // CLEAR_QUEUE - Delete queue file with confirmation
-    serial.registerCommand("CLEAR_QUEUE", [&orch](const String& args) {
-        Serial.println("\n=== Clear Queue ===");
-        Serial.println("⚠️  WARNING: This will delete ALL queued scans!");
-        Serial.println("Type 'YES' to confirm, or anything else to cancel:");
-
-        // Wait for confirmation (with 10 second timeout)
-        unsigned long startWait = millis();
-        String confirmation = "";
-        while (millis() - startWait < 10000) {
-            if (Serial.available()) {
-                confirmation = Serial.readStringUntil('\n');
-                confirmation.trim();
-                break;
-            }
-            delay(100);
-        }
-
-        if (confirmation == "YES") {
-            int beforeSize = orch.getQueueSize();
-            orch.clearQueue();  // Existing method
-            Serial.printf("✓ Queue cleared (%d entries deleted)\n", beforeSize);
-            Serial.println("Queue file deleted, cache reset to 0\n");
-        } else {
-            Serial.println("✗ Clear cancelled (confirmation not received)\n");
-        }
-    }, "Delete queue file (requires YES confirmation)");
-
-    // QUEUE_STATUS - Enhanced diagnostic information
-    serial.registerCommand("QUEUE_STATUS", [&orch](const String& args) {
-        Serial.println("\n=== Queue Status (Detailed) ===");
-
-        // Cached size (from RAM)
-        int cachedSize = orch.getQueueSize();
-        Serial.printf("Cached size: %d entries (from RAM)\n", cachedSize);
-
-        // File-based information (requires SD access)
-        hal::SDCard::Lock lock("queueStatus", freertos_config::SD_MUTEX_TIMEOUT_MS);
-        if (!lock.acquired()) {
-            Serial.println("✗ Could not acquire SD mutex");
-            Serial.println("=================================\n");
-            return;
-        }
-
-        if (!SD.exists(queue_config::QUEUE_FILE)) {
-            Serial.println("File status: NOT FOUND (empty queue)");
-            Serial.println("=================================\n");
-            return;
-        }
-
-        File file = SD.open(queue_config::QUEUE_FILE, FILE_READ);
-        if (!file) {
-            Serial.println("✗ Could not open queue file");
-            Serial.println("=================================\n");
-            return;
-        }
-
-        // File size
-        unsigned long fileSize = file.size();
-        Serial.printf("File size: %lu bytes", fileSize);
-        if (fileSize > queue_config::MAX_QUEUE_FILE_SIZE) {
-            Serial.print(" ⚠️  CORRUPT (exceeds threshold)");
-        }
-        Serial.println();
-
-        // Count actual lines
-        int actualLines = 0;
-        while (file.available()) {
-            file.readStringUntil('\n');
-            actualLines++;
-        }
-
-        Serial.printf("Actual lines: %d entries (from file)\n", actualLines);
-
-        // Cache vs file divergence check
-        if (cachedSize != actualLines) {
-            Serial.printf("⚠️  WARNING: Cache divergence detected!\n");
-            Serial.printf("   Cached: %d, Actual: %d (difference: %d)\n",
-                         cachedSize, actualLines, actualLines - cachedSize);
-        } else {
-            Serial.println("✓ Cache matches file");
-        }
-
-        // Reopen to show first/last entries
-        file.close();
-        file = SD.open(queue_config::QUEUE_FILE, FILE_READ);
-
-        if (file.available()) {
-            String firstLine = file.readStringUntil('\n');
-            firstLine.trim();
-            Serial.printf("\nFirst entry: %s\n",
-                         firstLine.length() > 80 ? (firstLine.substring(0, 77) + "...").c_str() : firstLine.c_str());
-
-            // Find last line (simple approach - read all)
-            String lastLine = "";
-            while (file.available()) {
-                String line = file.readStringUntil('\n');
-                line.trim();
-                if (line.length() > 0) {
-                    lastLine = line;
-                }
-            }
-            if (lastLine.length() > 0) {
-                Serial.printf("Last entry: %s\n",
-                             lastLine.length() > 80 ? (lastLine.substring(0, 77) + "...").c_str() : lastLine.c_str());
-            }
-        }
-
-        file.close();
-        Serial.println("=================================\n");
-    }, "Show detailed queue diagnostics (file size, line count, cache status)");
-
-    // FORCE_OVERFLOW - Test FIFO overflow protection
-    serial.registerCommand("FORCE_OVERFLOW", [&orch, &config](const String& args) {
-        Serial.println("\n=== FIFO Overflow Test ===");
-        Serial.println("Adding 105 mock scans (max=100)...");
-        Serial.printf("Queue size before: %d\n", orch.getQueueSize());
-
-        for (int i = 1; i <= 105; i++) {
-            models::ScanData mockScan;
-            mockScan.tokenId = String("OVERFLOW") + String(i);
-            mockScan.teamId = config.getConfig().teamID;
-            mockScan.deviceId = config.getConfig().deviceID;
-            mockScan.timestamp = String(millis());
-
-            orch.queueScan(mockScan);  // queueScan takes only ScanData
-        }
-
-        Serial.printf("Queue size after: %d (should be capped at 100)\n", orch.getQueueSize());
-
-        if (orch.getQueueSize() <= queue_config::MAX_QUEUE_SIZE) {
-            Serial.println("✓ FIFO overflow protection working");
-        } else {
-            Serial.println("✗ Warning: Queue exceeded maximum size!");
-        }
-
-        Serial.println("===========================\n");
-    }, "Test FIFO overflow (adds 105 entries)");
-
-    // SYNC_ASSETS_NOW - Trigger incremental asset re-sync without rebooting.
-    // Useful when a token's BMP is regenerated post-Notion-edit and a full
-    // reboot's 5-15 min sync window isn't viable. The sync is diff-based:
-    // only changed/missing files are downloaded. SD mutex timeout was raised
-    // to 60s (Task 4) so mid-session lock acquisition won't time out while
-    // the queue upload task is active.
-    serial.registerCommand("SYNC_ASSETS_NOW", [&config, &orch](const String& args) {
-        (void)args;  // no arguments expected
-        Serial.println("\n=== Asset Re-Sync ===");
-        Serial.println("Triggering incremental asset sync (diff-based)...");
-
-        if (orch.getState() != models::ConnectionState::ORCH_CONNECTED) {
-            Serial.println("✗ Not connected to orchestrator — cannot sync");
-            Serial.println("====================\n");
-            return;
-        }
-
-        auto& assets = services::AssetService::getInstance();
-        bool ok = assets.syncFromOrchestrator(config.getConfig().orchestratorURL, orch);
-        Serial.printf("[CMD] SYNC_ASSETS_NOW: %s\n", ok ? "ok" : "partial/failed");
-        Serial.println("====================\n");
-    }, "Trigger incremental asset re-sync from orchestrator (no reboot needed)");
-
-    LOG_INFO("[INIT] ✓ Serial commands registered (%d commands)\n", 15);
-}
-
-inline void Application::startBackgroundTasks() {
-    // Get singleton service references
-    auto& orch = services::OrchestratorService::getInstance();
-    auto& config = services::ConfigService::getInstance();
-
-    // Start FreeRTOS background sync task on Core 0
-    // (main loop runs on Core 1)
-    orch.startBackgroundTask(config.getConfig());
-
-    LOG_INFO("[INIT] ✓ Background queue sync task started on Core 0\n");
+    LOG_INFO("[INIT] ✓ Serial commands registered (%d commands)\n", 9);
 }
 
 // NOTE: processRFIDScan(), processTouch(), and loop() are already implemented above
@@ -1550,7 +965,6 @@ inline void Application::printBootBanner() {
                   ESP.getChipCores(), ESP.getCpuFreqMHz());
 }
 
-// NOTE: generateTimestamp() is already implemented above (line 549)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PPP MAIN SETUP METHOD PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
@@ -1592,7 +1006,9 @@ inline void Application::setup() {
         _debugMode = config.getConfig().debugMode;
     }
 
-    // 4. Boot override handling (30-second window, can force DEBUG_MODE=true)
+    // 4. Boot override handling (10-second window, can force DEBUG_MODE=true).
+    //    Paints the home screen first so a guest never sees a blank or
+    //    branded boot screen while the window runs.
     handleBootOverride();
 
     // 5. Initialize remaining hardware (RFID decision based on correct DEBUG_MODE)
@@ -1601,7 +1017,7 @@ inline void Application::setup() {
         return;
     }
 
-    // 6. Initialize services (tokens, orchestrator)
+    // 6. Initialize services (token database)
     if (!initializeServices()) {
         LOG_ERROR("SETUP", "Service initialization failed");
         // Continue in degraded mode
@@ -1609,9 +1025,6 @@ inline void Application::setup() {
 
     // 5. Register serial commands
     registerSerialCommands();
-
-    // 6. Start background tasks (Core 0)
-    startBackgroundTasks();
 
     // 7. Create UI state machine with HAL references
     auto& display = hal::DisplayDriver::getInstance();
@@ -1621,23 +1034,28 @@ inline void Application::setup() {
 
     _ui = new ui::UIStateMachine(display, touch, audio, sd);
 
-    // Wire status provider so tap-for-status shows real data
+    // Wire status provider so the hidden long-press screen shows real data
     _ui->setStatusProvider([this]() -> ui::StatusScreen::SystemStatus {
-        auto& orch = services::OrchestratorService::getInstance();
         auto& config = services::ConfigService::getInstance();
+        auto& tokens = services::TokenService::getInstance();
 
         ui::StatusScreen::SystemStatus status;
-        status.connState = orch.getState();
-        status.wifiSSID = WiFi.SSID();
-        status.localIP = WiFi.localIP().toString();
-        status.queueSize = orch.getQueueSize();
-        status.maxQueueSize = queue_config::MAX_QUEUE_SIZE;
-        status.teamID = config.getConfig().teamID;
-        status.deviceID = config.getConfig().deviceID;
+        status.deviceID   = config.getConfig().deviceID;
+        status.ghostCount = tokens.getCount();
+        status.rfidReady  = _rfidInitialized;
+        status.sdPresent  = hal::SDCard::getInstance().isPresent();
+        status.volume     = config.getConfig().volume;
+        status.freeHeap   = ESP.getFreeHeap();
         return status;
     });
 
-    _ui->showReady(_rfidInitialized, _debugMode);
+    if (hal::SDCard::getInstance().isPresent()) {
+        _ui->showReady(_rfidInitialized, _debugMode);
+    } else {
+        // Leave the NO SD CARD notice up. A "place ghost here" screen would
+        // claim the prop is working when it cannot read a single ghost.
+        LOG_ERROR("SETUP", "No SD card - leaving error notice on screen");
+    }
 
     Serial.println("\n━━━ Setup Complete ━━━");
     Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());

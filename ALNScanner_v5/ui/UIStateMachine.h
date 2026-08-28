@@ -1,10 +1,9 @@
 #pragma once
 
 #include "Screen.h"
-#include "screens/ReadyScreen.h"
+#include "screens/GhostReadyScreen.h"
 #include "screens/StatusScreen.h"
 #include "screens/TokenDisplayScreen.h"
-#include "screens/ProcessingScreen.h"
 #include "screens/ScanFailedScreen.h"
 #include "../hal/DisplayDriver.h"
 #include "../hal/TouchDriver.h"
@@ -23,25 +22,31 @@
 // Manages all screen transitions and touch event routing for ALNScanner.
 //
 // STATE MODEL:
-//   
-//    READY (idle)                                                   
-//        single-tap > SHOWING_STATUS                            
-//        RFID scan   > DISPLAYING_TOKEN or PROCESSING_VIDEO     
-//  $
-//    SHOWING_STATUS (diagnostics screen)                            
-//        any tap     > READY                                    
-//  $
-//    DISPLAYING_TOKEN (regular token with audio)                    
-//        double-tap  > READY                                    
-//  $
-//    PROCESSING_VIDEO (video token modal)                           
-//        2.5s auto   > READY (no touch interaction)             
-//   
+//
+//    READY (the "place ghost here" home screen)
+//        tap            -> ignored
+//        5s hold        -> SHOWING_STATUS
+//        RFID scan      -> DISPLAYING_TOKEN or SCAN_FAILED
+//
+//    SHOWING_STATUS (hidden diagnostics)
+//        any tap        -> READY
+//
+//    DISPLAYING_TOKEN (ghost on screen, audio playing)
+//        audio ends     -> READY   (auto; the prop is unattended)
+//        tap            -> READY
+//
+//    SCAN_FAILED (in-world "that's no spirit", non-blocking)
+//        1.5s auto      -> READY
+//        tap            -> READY
+//
+// RFID is blocked in DISPLAYING_TOKEN and SHOWING_STATUS, but NOT in
+// SCAN_FAILED — a guest must be able to re-tap immediately after a miss.
 //
 // TOUCH HANDLING:
 // - WiFi EMI filtering via TouchDriver (pulse width threshold)
 // - Debouncing (50ms)
-// - Double-tap detection (500ms window)
+// - Sustained-hold detection polled in updateLongPress(), because
+//   measurePulseWidth() caps at 500ms and blocks while measuring
 // - State-specific touch routing
 //
 // EXTRACTED FROM: ALNScanner1021_Orchestrator v4.1
@@ -65,8 +70,7 @@ public:
     enum class State {
         READY,              // Ready screen (idle, waiting for scan or tap)
         SHOWING_STATUS,     // Status/diagnostics screen
-        DISPLAYING_TOKEN,   // Token display with audio (regular token)
-        PROCESSING_VIDEO,   // Processing modal (video token, auto-hide)
+        DISPLAYING_TOKEN,   // Ghost on screen, audio playing
         SCAN_FAILED         // Transient failure screen (non-blocking, auto-hide)
     };
 
@@ -85,7 +89,7 @@ public:
         , _lastTouchTime(0)
         , _lastTouchWasValid(false)
         , _lastTouchDebounce(0)
-        , _processingStartTime(0)
+        , _pressStart(0)
         , _scanFailedStartTime(0)
         , _rfidReady(false)
         , _debugMode(false)
@@ -97,8 +101,7 @@ public:
     // PPP STATE TRANSITIONS PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
     // PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
 
-    // Transition to READY state
-    // Source: drawReadyScreen() lines 2326-2362
+    // Transition to READY state (the "place ghost here" home screen)
     void showReady(bool rfidReady, bool debugMode) {
         _rfidReady = rfidReady;
         _debugMode = debugMode;
@@ -107,17 +110,15 @@ public:
                  rfidReady ? "ready" : "disabled",
                  debugMode ? "ON" : "OFF");
 
-        // Create ready screen with current RFID state
-        auto screen = std::unique_ptr<ReadyScreen>(
-            new ReadyScreen(rfidReady, debugMode)
+        auto screen = std::unique_ptr<GhostReadyScreen>(
+            new GhostReadyScreen(rfidReady)
         );
 
-        // Transition and render
         transitionTo(State::READY, std::move(screen));
 
-        // Reset touch state
         _lastTouchWasValid = false;
         _lastTouchTime = 0;
+        _pressStart = 0;
     }
 
     // Transition to SHOWING_STATUS state
@@ -135,51 +136,25 @@ public:
     }
 
     // Transition to DISPLAYING_TOKEN state
-    // Source: processTokenScan() lines 3511-3559
-    void showToken(const models::TokenMetadata& token) {
-        LOG_INFO("[UI-STATE] Transitioning to DISPLAYING_TOKEN (token: %s)\n",
+    //
+    // @param hasImage A BMP for this ghost exists on the card
+    // @param hasAudio A WAV for this ghost exists on the card
+    //
+    // The caller establishes both before calling; at least one must be true.
+    void showToken(const models::TokenMetadata& token, bool hasImage, bool hasAudio) {
+        LOG_INFO("[UI-STATE] Transitioning to DISPLAYING_TOKEN (%s)\n",
                  token.tokenId.c_str());
 
-        // Create token display screen
-        auto* tokenScreen = new TokenDisplayScreen(token);
+        auto* tokenScreen = new TokenDisplayScreen(token, hasImage, hasAudio);
         auto screen = std::unique_ptr<TokenDisplayScreen>(tokenScreen);
 
-        // Store raw pointer for audio updates (ownership stays with unique_ptr)
+        // Raw pointer for update()/auto-dismiss polling; unique_ptr keeps ownership
         _tokenScreenPtr = tokenScreen;
 
-        // Transition and render
         transitionTo(State::DISPLAYING_TOKEN, std::move(screen));
 
-        // Reset touch state for double-tap detection
         _lastTouchWasValid = false;
         _lastTouchTime = 0;
-    }
-
-    // Transition to PROCESSING_VIDEO state
-    // Source: displayProcessingImage() lines 2179-2235
-    //
-    // @param label    Overlay text. Default "Sending..." (normal video
-    //                 treatment). Pass "VIDEO UNAVAILABLE" when the video
-    //                 cannot play — scan queued offline or rejected by the
-    //                 backend (decision A4: queued/rejected scans never
-    //                 trigger playback later).
-    // @param sublabel Optional second overlay line (e.g., "Rescan later").
-    void showProcessing(const models::TokenMetadata& token,
-                        const String& label = "Sending...",
-                        const String& sublabel = "") {
-        LOG_INFO("[UI-STATE] Transitioning to PROCESSING_VIDEO (token: %s, label: %s)\n",
-                 token.tokenId.c_str(), label.c_str());
-
-        // Create processing screen with token metadata
-        auto screen = std::unique_ptr<ProcessingScreen>(
-            new ProcessingScreen(token, label, sublabel)
-        );
-
-        // Transition and render
-        transitionTo(State::PROCESSING_VIDEO, std::move(screen));
-
-        // Start auto-hide timer
-        _processingStartTime = millis();
     }
 
     // Transition to SCAN_FAILED state (non-blocking)
@@ -250,32 +225,28 @@ public:
         handleTouchInState(_state, now);
     }
 
-    // Update loop - handles audio playback and auto-timeouts
-    // Source: loop() audio updates and processing modal timeout
+    // Update loop - services audio, auto-dismissal and the long-press
     void update() {
-        // Update audio for TokenDisplayScreen (state-based, no RTTI needed)
         if (_state == State::DISPLAYING_TOKEN && _tokenScreenPtr) {
             _tokenScreenPtr->update();
-        }
 
-        // Check processing modal timeout (2.5s auto-hide)
-        // Source: displayProcessingImage() lines 2227-2234
-        if (_state == State::PROCESSING_VIDEO) {
-            uint32_t elapsed = millis() - _processingStartTime;
-            if (elapsed >= timing::PROCESSING_MODAL_TIMEOUT_MS) {
-                LOG_INFO("[UI-STATE] Processing modal timeout - returning to ready\n");
+            // The prop is unattended: a ghost must clear itself so a guest
+            // who walks away mid-clip does not leave a stale screen.
+            if (_tokenScreenPtr->shouldAutoDismiss()) {
+                LOG_INFO("[UI-STATE] Ghost finished - returning to ready\n");
                 showReady(_rfidReady, _debugMode);
             }
         }
 
-        // Check scan-failed auto-dismiss timeout
+        // Scan-failed auto-dismiss
         if (_state == State::SCAN_FAILED) {
-            uint32_t elapsed = millis() - _scanFailedStartTime;
-            if (elapsed >= timing::SCAN_FAILED_TIMEOUT_MS) {
+            if ((millis() - _scanFailedStartTime) >= timing::SCAN_FAILED_TIMEOUT_MS) {
                 LOG_INFO("[UI-STATE] SCAN_FAILED timeout - returning to ready\n");
                 showReady(_rfidReady, _debugMode);
             }
         }
+
+        updateLongPress();
     }
 
     // Get current state
@@ -292,8 +263,7 @@ public:
     // Source: lines 3661-3664
     bool isBlockingRFID() const {
         return (_state == State::DISPLAYING_TOKEN ||
-                _state == State::SHOWING_STATUS ||
-                _state == State::PROCESSING_VIDEO);
+                _state == State::SHOWING_STATUS);
     }
 
 private:
@@ -313,8 +283,8 @@ private:
     bool _lastTouchWasValid;
     uint32_t _lastTouchDebounce;
 
-    // Processing modal timing
-    uint32_t _processingStartTime;
+    // Long-press (hidden status screen) timing
+    uint32_t _pressStart;
 
     // Scan-failed auto-dismiss timing
     uint32_t _scanFailedStartTime;
@@ -362,58 +332,22 @@ private:
                 break;
 
             case State::DISPLAYING_TOKEN:
-                // Double-tap dismisses token display (FR-036)
-                // Source: lines 3614-3638
-                if (_lastTouchWasValid &&
-                    (now - _lastTouchTime) < timing::DOUBLE_TAP_TIMEOUT_MS) {
-                    // Double-tap detected
-                    LOG_INFO("[UI-STATE] DISPLAYING_TOKEN: Double-tap - dismissing\n");
-                    _audio.stop();
-                    showReady(_rfidReady, _debugMode);
-                    _lastTouchWasValid = false;
-                } else {
-                    // First tap - start double-tap timer
-                    LOG_INFO("[UI-STATE] DISPLAYING_TOKEN: First tap registered\n");
-                    _lastTouchTime = now;
-                    _lastTouchWasValid = true;
-                }
+                // Single tap dismisses. Double-tap was safe on main only
+                // because the home screen carried a "Double-Tap to Escape"
+                // hint; that hint is gone, and an unhinted double-tap is
+                // undiscoverable. Single tap is safe here now that the
+                // status screen requires a deliberate long-press.
+                LOG_INFO("[UI-STATE] DISPLAYING_TOKEN: Tap - dismissing\n");
+                _audio.stop();
+                showReady(_rfidReady, _debugMode);
                 break;
 
             case State::READY:
-                // Single-tap shows status screen (FR-038)
-                // Source: lines 3641-3655
-                if (_lastTouchWasValid &&
-                    (now - _lastTouchTime) < timing::DOUBLE_TAP_TIMEOUT_MS) {
-                    // This is a double-tap in idle state - ignore
-                    LOG_INFO("[UI-STATE] READY: Double-tap ignored (idle)\n");
-                    _lastTouchWasValid = false;
-                } else {
-                    // Single tap - show status
-                    LOG_INFO("[UI-STATE] READY: Single-tap - showing status\n");
-
-                    if (_statusProvider) {
-                        showStatus(_statusProvider());
-                    } else {
-                        LOG_ERROR("UI-STATE", "No status provider set - using defaults");
-                        StatusScreen::SystemStatus status;
-                        status.connState = models::ORCH_DISCONNECTED;
-                        status.wifiSSID = "N/A";
-                        status.localIP = "0.0.0.0";
-                        status.queueSize = 0;
-                        status.maxQueueSize = queue_config::MAX_QUEUE_SIZE;
-                        status.teamID = "---";
-                        status.deviceID = "NO PROVIDER";
-                        showStatus(status);
-                    }
-
-                    _lastTouchTime = now;
-                    _lastTouchWasValid = true;
-                }
-                break;
-
-            case State::PROCESSING_VIDEO:
-                // Processing modal ignores touch (auto-timeout only)
-                LOG_INFO("[UI-STATE] PROCESSING_VIDEO: Touch ignored (auto-timeout)\n");
+                // Deliberately inert. Guests will touch the screen; the
+                // status screen is reachable only by a sustained hold,
+                // handled in updateLongPress().
+                LOG_INFO("[UI-STATE] READY: Tap ignored (hold %lums for status)\n",
+                         (unsigned long)timing::LONG_PRESS_MS);
                 break;
 
             case State::SCAN_FAILED:
@@ -421,6 +355,53 @@ private:
                 LOG_INFO("[UI-STATE] SCAN_FAILED: Tap dismiss - returning to ready\n");
                 showReady(_rfidReady, _debugMode);
                 break;
+        }
+    }
+
+    /**
+     * @brief Reveal the hidden status screen on a sustained hold
+     *
+     * Polled rather than measured inside handleTouch(): TouchDriver's
+     * measurePulseWidth() caps at 500ms and blocks while measuring, so it
+     * can neither observe a multi-second hold nor be called from a loop
+     * that must keep polling RFID and servicing audio.
+     *
+     * Only armed on the home screen. A hold that begins elsewhere, or that
+     * lifts early, resets cleanly.
+     */
+    void updateLongPress() {
+        if (_state != State::READY) {
+            _pressStart = 0;
+            return;
+        }
+
+        if (!_touch.isPressed()) {
+            _pressStart = 0;
+            return;
+        }
+
+        if (_pressStart == 0) {
+            _pressStart = millis();
+            return;
+        }
+
+        if ((millis() - _pressStart) >= timing::LONG_PRESS_MS) {
+            _pressStart = 0;
+            LOG_INFO("[UI-STATE] Long-press - showing status\n");
+
+            if (_statusProvider) {
+                showStatus(_statusProvider());
+            } else {
+                LOG_ERROR("UI-STATE", "No status provider set");
+                StatusScreen::SystemStatus status;
+                status.deviceID   = "NO PROVIDER";
+                status.ghostCount = 0;
+                status.rfidReady  = _rfidReady;
+                status.sdPresent  = false;
+                status.volume     = 0.0f;
+                status.freeHeap   = 0;
+                showStatus(status);
+            }
         }
     }
 
@@ -435,7 +416,6 @@ inline const char* stateToString(UIStateMachine::State state) {
         case UIStateMachine::State::READY:             return "READY";
         case UIStateMachine::State::SHOWING_STATUS:    return "SHOWING_STATUS";
         case UIStateMachine::State::DISPLAYING_TOKEN:  return "DISPLAYING_TOKEN";
-        case UIStateMachine::State::PROCESSING_VIDEO:  return "PROCESSING_VIDEO";
         case UIStateMachine::State::SCAN_FAILED:       return "SCAN_FAILED";
         default:                                        return "UNKNOWN";
     }
