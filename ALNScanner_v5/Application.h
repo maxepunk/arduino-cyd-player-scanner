@@ -1070,6 +1070,17 @@ inline void Application::registerSerialCommands() {
     // CONFIG - Show current configuration
     serial.registerCommand("CONFIG", [&config](const String& args) {
         config.getConfig().print();  // Config model has print() method
+        // A2 staleness visibility: the pack captured from the last asset
+        // manifest sync (empty on pre-pack backends / before first sync)
+        auto& assets = services::AssetService::getInstance();
+        if (assets.packId().length() > 0) {
+            Serial.printf("Game pack: %s v%s (%s)\n",
+                          assets.packId().c_str(),
+                          assets.packVersion().c_str(),
+                          assets.packHash().c_str());
+        } else {
+            Serial.println("Game pack: unknown (no pack identity in last asset sync)");
+        }
     }, "Show current device configuration");
 
     // STATUS / DIAG_NETWORK - Show orchestrator connection status

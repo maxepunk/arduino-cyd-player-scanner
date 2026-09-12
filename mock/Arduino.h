@@ -66,6 +66,23 @@ public:
         return _buf.compare(0, std::strlen(prefix), prefix) == 0;
     }
     bool startsWith(const String& prefix) const { return startsWith(prefix.c_str()); }
+    int indexOf(char c) const {
+        size_t pos = _buf.find(c);
+        return pos == std::string::npos ? -1 : static_cast<int>(pos);
+    }
+    int indexOf(const char* s) const {
+        size_t pos = _buf.find(s);
+        return pos == std::string::npos ? -1 : static_cast<int>(pos);
+    }
+
+    // Substring (Arduino semantics: [from, to) — to clamped to length)
+    String substring(unsigned int from) const {
+        return String(from < _buf.length() ? _buf.substr(from).c_str() : "");
+    }
+    String substring(unsigned int from, unsigned int to) const {
+        if (from >= _buf.length() || to <= from) return String("");
+        return String(_buf.substr(from, std::min<size_t>(to, _buf.length()) - from).c_str());
+    }
 
     // Mutation (Arduino String mutates in place, returns void)
     void replace(const char* from, const char* to) {
